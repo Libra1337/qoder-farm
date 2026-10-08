@@ -815,7 +815,7 @@ dependencies = [
     { name = "drissionpage" },
     { name = "fastapi" },
     { name = "httpx" },
-    { name = "pypiwin32" },
+    { name = "pypiwin32", marker = "sys_platform == 'win32'" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -825,7 +825,7 @@ requires-dist = [
     { name = "drissionpage", specifier = ">=4.1.1.4" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "pypiwin32", specifier = ">=223" },
+    { name = "pypiwin32", marker = "sys_platform == 'win32'", specifier = ">=223" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.6" },
 ]
 
