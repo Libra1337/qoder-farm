@@ -11,6 +11,7 @@ import httpx
 from . import encoding
 from .auth import SessionContext, bearer_headers
 from .env import httpx_client_kwargs
+from .fingerprint import derive_id
 
 
 QODER_CHAT_URL = "https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
@@ -238,22 +239,97 @@ def build_qoder_messages(template_messages: list[dict[str, Any]], incoming: list
     return rebuilt
 
 
+_IMG_MAGIC = ((b"iVBORw0KGgo", "image/png"), (b"/9j/", "image/jpeg"), (b"R0lGOD", "image/gif"), (b"UklGR", "image/webp"))
+
+
+def _normalize_image_url(url: str) -> str:
+    """裸 base64 补 data: 前缀(魔数嗅探);已带 scheme 的不动。"""
+    if not isinstance(url, str) or len(url) < 64 or ":" in url[:16]:
+        return url
+    try:
+        import base64
+        head = base64.b64decode(url[:48] + "===", validate=False)[:16]
+        for magic, mime in _IMG_MAGIC:
+            if head.startswith(magic.encode()):
+                return f"data:{mime};base64,{url}"
+    except Exception:
+        pass
+    return url
+
+
+def _normalize_images(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """图片消息规范化:1) 裸 base64 补前缀;2) assistant 轮的图片挪到紧随的合成 user 轮(上游丢弃 assistant 图)。"""
+    out: list[dict[str, Any]] = []
+    pending_images: list[dict[str, Any]] = []
+    for msg in messages:
+        msg = copy.deepcopy(msg)
+        content = msg.get("content")
+        if isinstance(content, list):
+            texts, images = [], []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    iu = part.get("image_url") or {}
+                    if isinstance(iu, dict):
+                        iu = dict(iu, url=_normalize_image_url(iu.get("url", "")))
+                        images.append({**part, "image_url": iu})
+                    continue
+                texts.append(part)
+            if images:
+                if msg.get("role") == "assistant":
+                    # 上游不收 assistant 轮图片:暂存,注入下一条 user 消息
+                    msg["content"] = texts or [{"type": "text", "text": ""}]
+                    pending_images.extend(images)
+                else:
+                    msg["content"] = texts + images
+            else:
+                msg["content"] = texts
+        if msg.get("role") == "user" and pending_images:
+            content = msg.get("content")
+            if isinstance(content, list):
+                msg["content"] = list(content) + pending_images
+            else:
+                msg["content"] = [{"type": "text", "text": str(content or "")}] + pending_images
+            pending_images = []
+        out.append(msg)
+    if pending_images:
+        out.append({"role": "user", "content": pending_images})
+    return out
+
+
+def conversation_fingerprint(req: dict[str, Any]) -> str:
+    """会话指纹:首条 system + 首条 user 全文哈希(截断会撞键),用于粘性路由与稳定 Session-ID。"""
+    import hashlib
+    parts: list[str] = []
+    for role in ("system", "user"):
+        for msg in req.get("messages") or []:
+            if msg.get("role") == role:
+                c = msg.get("content")
+                if isinstance(c, list):
+                    c = " ".join(str(p.get("text", "")) for p in c if isinstance(p, dict))
+                parts.append(str(c or ""))
+                break
+    return hashlib.sha256("\0".join(parts).encode(errors="ignore")).hexdigest()[:24]
+
+
 def build_qoder_body(req: dict[str, Any], sess: SessionContext) -> tuple[dict[str, Any], str, bool]:
     """新版协议 body：OpenAI 原生格式，直接透传 messages/tools。"""
     model = req.get("model") or "lite"
     messages = req.get("messages") if isinstance(req.get("messages"), list) else []
     tools_enabled = bool(req.get("tools"))
     rid = str(uuid.uuid4())
+    conv = conversation_fingerprint(req)
+    # 稳定 session_id:同会话恒定 → 上游前缀缓存命中;不同账号派生互异 → 防风控折叠
+    stable_session = derive_id(sess.identity.uid, "session", conv)
     body: dict[str, Any] = {
         "model": model,
-        "messages": copy.deepcopy(messages or []),
+        "messages": _normalize_images(messages or []),
         "stream": True,
         "stream_options": {"include_usage": True},
         "metadata": {
             "context": {
                 "request_id": rid,
                 "request_set_id": rid,
-                "session_id": str(uuid.uuid4()),
+                "session_id": stable_session,
                 "task_id": "common",
                 "client_type": "qodercli",
             }
@@ -337,12 +413,13 @@ class ToolCallAccumulator:
 
 async def qoder_stream_lines(sess: SessionContext, body: dict[str, Any], model: str) -> AsyncIterator[str]:
     """新版协议：POST api2-v2.qoder.sh/model/v1/chat/completions，Bearer 直连。"""
+    import os as _os
     ctx = (body.get("metadata") or {}).get("context") or {}
     headers = {
         "Authorization": f"Bearer {sess.identity.security_oauth_token}",
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
-        "User-Agent": "qoder/1.1.16",
+        "User-Agent": f"qoder/{_os.getenv('QODER_CLI_VERSION', '1.1.16')}",
         "X-Request-ID": ctx.get("request_id", ""),
         "X-Session-ID": ctx.get("session_id", ""),
     }

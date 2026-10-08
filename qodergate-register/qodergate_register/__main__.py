@@ -9,10 +9,15 @@ qodergate-register —— Qoder 独立注册机
 用法：
   python -m qodergate_register --parents 2            # 2 个母线程
   python -m qodergate_register --parents 1 --output ./out.json
-  python -m qodergate_register --check               # 检查 YYDS_API_KEY 配置
+  python -m qodergate_register --check               # 检查邮箱提供方配置
   Ctrl+C 停止（当前批次完成后停止并打印统计）
 
-环境变量：YYDS_API_KEY（必填，AC- 开头，也可放项目根 .env）
+环境变量（项目根 .env 或系统环境）：
+  MAIL_PROVIDER=shiro|yyds       # 邮箱提供方，默认 shiro（mail.futile.page 自建邮局）
+  SHIRO_API_KEY=sk_live-...      # shiro 必填
+  SHIRO_BASE_URL=https://mail.futile.page
+  SHIRO_DOMAIN_ID=2              # futile.page 域名 id
+  YYDS_API_KEY=AC-...            # yyds 必填（MAIL_PROVIDER=yyds 时）
 """
 from __future__ import annotations
 
@@ -29,7 +34,9 @@ if sys.platform == "win32":
         pass
 
 from .core import (
+    _env,
     _yyds_key,
+    mail_provider,
     get_registrar_status,
     start_registration,
     stop_registration,
@@ -37,12 +44,40 @@ from .core import (
 
 
 def _check() -> int:
-    key = _yyds_key()
-    if key:
-        print(f"[check] YYDS_API_KEY 已配置: {key[:3]}...{key[-4:]}")
-        return 0
-    print("[check] YYDS_API_KEY 未配置：请设置环境变量或在项目根 .env 添加 YYDS_API_KEY=AC-...")
-    return 1
+    provider = mail_provider()
+    print(f"[check] MAIL_PROVIDER = {provider}")
+    if provider == "yyds":
+        key = _yyds_key()
+        if key:
+            print(f"[check] YYDS_API_KEY 已配置: {key[:3]}...{key[-4:]}")
+            return 0
+        print("[check] YYDS_API_KEY 未配置：请设置环境变量或在项目根 .env 添加 YYDS_API_KEY=AC-...")
+        return 1
+    key = _env("SHIRO_API_KEY")
+    if not key:
+        print("[check] SHIRO_API_KEY 未配置：请设置环境变量或在项目根 .env 添加 SHIRO_API_KEY=sk_live-...")
+        return 1
+    print(f"[check] SHIRO_API_KEY 已配置: {key[:8]}...{key[-4:]}")
+    base = _env("SHIRO_BASE_URL") or "https://mail.futile.page"
+    domain_id = _env("SHIRO_DOMAIN_ID") or "2"
+    print(f"[check] ShiroMail: {base} domainId={domain_id}")
+    # 连通性实测：列域名
+    try:
+        import httpx
+        r = httpx.get(f"{base.rstrip('/')}/api/v1/domains", headers={"Authorization": f"Bearer {key}"}, timeout=15)
+        if r.status_code == 200:
+            items = r.json().get("items") or []
+            doms = ", ".join(f"{d.get('domain')}(id={d.get('id')})" for d in items)
+            print(f"[check] 域名列表: {doms or '(空)'}")
+            if not any(str(d.get("id")) == str(domain_id) for d in items):
+                print(f"[check] 警告: SHIRO_DOMAIN_ID={domain_id} 不在域名列表中，建邮箱会 forbidden")
+                return 1
+            return 0
+        print(f"[check] 域名列表请求失败: HTTP {r.status_code}")
+        return 1
+    except Exception as e:
+        print(f"[check] 连通性测试失败: {e}")
+        return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -55,8 +90,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         return _check()
 
-    if not _yyds_key():
-        print("[error] YYDS_API_KEY 未配置：请设置环境变量或在项目根 .env 添加 YYDS_API_KEY=AC-...")
+    if mail_provider() == "yyds":
+        if not _yyds_key():
+            print("[error] YYDS_API_KEY 未配置：请设置环境变量或在项目根 .env 添加 YYDS_API_KEY=AC-...")
+            return 1
+    elif not _env("SHIRO_API_KEY"):
+        print("[error] SHIRO_API_KEY 未配置：请设置环境变量或在项目根 .env 添加 SHIRO_API_KEY=sk_live-...")
         return 1
 
     r = start_registration(parents=args.parents)

@@ -1,6 +1,9 @@
 import argparse
+import asyncio
 import collections
+import hmac
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -25,7 +28,14 @@ from .accounts import (
     batch_import_accounts,
 )
 from .registrar import get_registrar_status, start_registration, stop_registration
+from .accounts import get_session_for_uid
+from .bridge import conversation_fingerprint
+from .fingerprint import redact
+from .reqlog import init_reqlog_db, record_req, parse_usage_frame, query_req_logs, usage_stats
 from .tokens import (
+    update_account_quota,
+    refresh_all_quotas,
+    start_quota_refresh_loop,
     refresh_all_account_tokens,
     refresh_one_account,
     get_account_quota,
@@ -45,11 +55,12 @@ _session: SessionContext | None = None
 _local_auth_error: str | None = None
 
 logs_queue = collections.deque(maxlen=150)
+init_reqlog_db()
 
 
 def add_log(msg: str, level: str = "INFO") -> None:
     timestamp = datetime.now().strftime("%H:%M:%S")
-    formatted = f"[{timestamp}] [{level}] {msg}"
+    formatted = f"[{timestamp}] [{level}] {redact(str(msg))}"
     logs_queue.append(formatted)
     print(formatted)
 
@@ -59,10 +70,17 @@ add_log("Qoder2API Python Bridge initialized.")
 
 
 
+def _ct_equal(a: str | None, b: str | None) -> bool:
+    """恒时比较,防时序攻击(trae2api/Reso2api 同款纪律)。"""
+    if not a or not b:
+        return False
+    return hmac.compare_digest(a.encode(), b.encode())
+
+
 def check_gateway_token(x_gateway_token: str | None = Header(default=None)):
     config = load_config()
     gateway_token = config.get("gateway_token", "admin")
-    if not x_gateway_token or x_gateway_token != gateway_token:
+    if not _ct_equal(x_gateway_token, gateway_token):
         raise HTTPException(status_code=401, detail="Unauthorized gateway access")
 
 
@@ -268,6 +286,37 @@ async def delete_account(uid: str, verify: None = Depends(check_gateway_token)) 
     return {"status": "ok"}
 
 
+@app.get("/v1/models")
+async def v1_models():
+    """模型列表(lite 免费档;premium 档需账号有 credits,0 额度号 402)。"""
+    premium = [m.strip() for m in os.getenv("QODER_PREMIUM_MODELS", "plus,pro,max,ultra").split(",") if m.strip()]
+    data = [{"id": "lite", "object": "model", "owned_by": "qoder", "note": "free tier, unlimited for free accounts"}]
+    data += [{"id": m, "object": "model", "owned_by": "qoder", "note": "requires credits (402 on free accounts)"} for m in premium]
+    return {"object": "list", "data": data}
+
+
+@app.get("/ui/requests")
+async def ui_requests(verify: None = Depends(check_gateway_token), page: int = 1, size: int = 50,
+                      model: str | None = None, uid: str | None = None, ok: str | None = None):
+    """调用日志(分页;page/size=0 返回内存窗口最近记录)。"""
+    ok_only = None if ok is None else (ok == "1")
+    return query_req_logs(page=page, size=size, model=model, uid=uid, ok_only=ok_only)
+
+
+@app.get("/ui/usage/stats")
+async def ui_usage_stats(verify: None = Depends(check_gateway_token), days: int = 7):
+    """用量统计:按日/按模型/按账号(tokens+credits),来自本地调用日志。"""
+    return usage_stats(days=min(max(days, 1), 31))
+
+
+@app.post("/ui/accounts/refresh-quota")
+async def ui_refresh_quota(verify: None = Depends(check_gateway_token)):
+    """手动刷新全部账号余额(quota/usage)。"""
+    res = refresh_all_quotas()
+    add_log(f"Quota refresh: ok={res['ok']} failed={res['failed']} total={res['total']}")
+    return {"status": "ok", **res}
+
+
 @app.get("/ui/logs")
 async def get_logs(verify: None = Depends(check_gateway_token)) -> list[str]:
     return list(logs_queue)
@@ -345,6 +394,74 @@ async def set_session(payload: dict[str, Any], verify: None = Depends(check_gate
         raise HTTPException(status_code=502, detail=msg) from exc
 
 
+# ---------------- 会话粘性 / 冷却 / 每账号并发(Reso2api pool.go 纪律) ----------------
+_STICKY_MAX_USES = 50       # 每会话最多粘同一账号 50 次,期满重摊
+_STICKY_IDLE_S = 2 * 3600   # 粘性 2h 空闲过期
+_STICKY_CAP = 4096          # LRU 上限
+_sticky: collections.OrderedDict[str, tuple[str, int, float]] = collections.OrderedDict()
+_cooldowns: dict[str, float] = {}  # uid -> 冷却截止(unix ts)
+_acct_sems: dict[str, asyncio.Semaphore] = {}
+_ACCT_CONCURRENCY = int(os.getenv("QODER_ACCOUNT_CONCURRENCY", "2"))
+_FIRST_TOKEN_BUDGET = int(os.getenv("QODER_FIRST_TOKEN_TIMEOUT", "45"))
+
+
+def _sem_for(uid: str) -> asyncio.Semaphore:
+    sem = _acct_sems.get(uid)
+    if sem is None:
+        sem = asyncio.Semaphore(_ACCT_CONCURRENCY)
+        _acct_sems[uid] = sem
+    return sem
+
+
+def _cooldown(uid: str, seconds: float) -> None:
+    _cooldowns[uid] = time.time() + seconds
+
+
+def _cooling(uid: str) -> bool:
+    until = _cooldowns.get(uid)
+    if until and until > time.time():
+        return True
+    _cooldowns.pop(uid, None)
+    return False
+
+
+def _sticky_get(conv: str) -> str | None:
+    hit = _sticky.get(conv)
+    if not hit:
+        return None
+    uid, uses, ts = hit
+    if time.time() - ts > _STICKY_IDLE_S or uses >= _STICKY_MAX_USES:
+        _sticky.pop(conv, None)
+        return None
+    _sticky[conv] = (uid, uses + 1, time.time())
+    _sticky.move_to_end(conv)
+    return uid
+
+
+def _sticky_put(conv: str, uid: str) -> None:
+    _sticky[conv] = (uid, 1, time.time())
+    _sticky.move_to_end(conv)
+    while len(_sticky) > _STICKY_CAP:
+        _sticky.popitem(last=False)
+
+
+def _sticky_drop(conv: str) -> None:
+    _sticky.pop(conv, None)
+
+
+async def pick_session(payload: dict[str, Any]) -> tuple[SessionContext, str]:
+    """粘性优先(同会话同账号 → 上游前缀缓存命中),冷却/失效则回退轮转。"""
+    conv = conversation_fingerprint(payload)
+    uid = _sticky_get(conv)
+    if uid and not _cooling(uid):
+        try:
+            return get_session_for_uid(uid), conv
+        except Exception:
+            _sticky_drop(conv)
+    sess = await get_session()  # 现行 active 账号逻辑
+    return sess, conv
+
+
 def is_quota_error(exc: Exception) -> bool:
     """判断是否为 quota/限流类错误（429 / quota / rate limit）。
     这类错误需先查询真实限额确认，不能直接跳过账户。"""
@@ -386,7 +503,7 @@ async def chat_completions(payload: dict[str, Any], authorization: str | None = 
         if authorization and authorization.startswith("Bearer "):
             incoming_key = authorization[len("Bearer "):].strip()
         
-        if not incoming_key or incoming_key not in allowed_keys:
+        if not incoming_key or not any(_ct_equal(incoming_key, k) for k in allowed_keys):
             add_log("Access denied: Invalid or missing API Key in request header.", "WARNING")
             raise HTTPException(status_code=401, detail="Invalid or missing API Key")
 
@@ -399,33 +516,63 @@ async def chat_completions(payload: dict[str, Any], authorization: str | None = 
     enabled_count = sum(1 for acc in accounts_data["accounts"] if acc.get("enabled", True))
     max_retries = max(1, enabled_count)
     
+    import time as _time
+    _t0 = _time.perf_counter()
     for attempt in range(max_retries):
+        conv = None
         try:
-            sess = await get_session()
-            add_log(f"Request routing via account: {sess.identity.name} ({sess.identity.uid})")
+            sess, conv = await pick_session(payload)
+            sem = _sem_for(sess.identity.uid)
+            add_log(f"Request routing via account: {sess.identity.name} ({sess.identity.uid[:13]}...) sticky={bool(_sticky.get(conv or ''))}")
             if stream:
-                gen = stream_openai_response(payload, sess)
+                await sem.acquire()  # 整个流期间占用;wrapper 结束时释放
                 try:
-                    first_item = await gen.__anext__()
-                except StopAsyncIteration:
-                    first_item = None
-                
-                async def stream_success_wrapper(first, g):
-                    if first is not None:
-                        yield first
-                    async for chunk in g:
-                        yield chunk
-                
+                    gen = stream_openai_response(payload, sess)
+                    try:
+                        first_item = await asyncio.wait_for(gen.__anext__(), timeout=_FIRST_TOKEN_BUDGET)
+                    except StopAsyncIteration:
+                        first_item = None
+                except BaseException:
+                    sem.release()
+                    raise
+
+                _ttfb = int(( _time.perf_counter() - _t0) * 1000)
+                _usage = {"in_tokens": 0, "out_tokens": 0, "credits": 0.0}
+                _req_uid, _req_model = sess.identity.uid, model
+
+                async def stream_success_wrapper(first, g, held_sem):
+                    _t_start = _time.perf_counter()
+                    try:
+                        if first is not None:
+                            yield first
+                        async for chunk in g:
+                            u = parse_usage_frame(chunk)
+                            if u:
+                                _usage.update(u)
+                            yield chunk
+                    finally:
+                        held_sem.release()
+                        record_req(_req_model, _req_uid, 200, True, _ttfb,
+                                   int((_time.perf_counter() - _t_start) * 1000),
+                                   _usage["in_tokens"], _usage["out_tokens"], _usage["credits"])
+
                 add_log(f"Streaming response initiated (Attempt {attempt+1}/{max_retries}).")
+                _sticky_put(conv, sess.identity.uid)
                 return StreamingResponse(
-                    stream_success_wrapper(first_item, gen),
+                    stream_success_wrapper(first_item, gen, sem),
                     media_type="text/event-stream",
-                    headers={"Cache-Control": "no-cache"}
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
                 )
             else:
-                add_log(f"Generating full completion response (Attempt {attempt+1}/{max_retries})...")
-                resp = await complete_openai_response(payload, sess)
+                async with sem:
+                    add_log(f"Generating full completion response (Attempt {attempt+1}/{max_retries})...")
+                    resp = await complete_openai_response(payload, sess)
                 add_log("Completion request finished successfully.")
+                _sticky_put(conv, sess.identity.uid)
+                _u = (resp or {}).get("usage") or {}
+                record_req(model, sess.identity.uid, 200, False,
+                           int((_time.perf_counter() - _t0) * 1000), int((_time.perf_counter() - _t0) * 1000),
+                           _u.get("prompt_tokens", 0), _u.get("completion_tokens", 0), _u.get("credit", 0) or 0)
                 return resp
         except Exception as exc:
             current_uid = sess.identity.uid if 'sess' in locals() else "unknown"
@@ -446,6 +593,10 @@ async def chat_completions(payload: dict[str, Any], authorization: str | None = 
                         raise HTTPException(status_code=502, detail=f"{exc}")
                 else:
                     add_log(f"Account-level error on {current_uid}: {exc}. Rotating to next account...", "WARNING")
+                if conv:
+                    _sticky_drop(conv)
+                if is_quota_error(exc):
+                    _cooldown(current_uid, 60.0)
                 try:
                     rotate_next_account(current_uid, str(exc))
                 except Exception as e:

@@ -29,6 +29,11 @@ from typing import Any
 
 import httpx
 
+try:
+    from .fingerprint import machine_profile
+except ImportError:
+    from fingerprint import machine_profile
+
 import os
 
 APP_DIR = Path(__file__).resolve().parent.parent  # 项目根
@@ -37,10 +42,16 @@ APP_DIR = Path(__file__).resolve().parent.parent  # 项目根
 # 配置
 # ---------------------------------------------------------------------------
 YYDS_API = "https://maliapi.215.im/v1"
+SHIRO_API = "https://mail.futile.page"
+SHIRO_DOMAIN_ID = 2  # futile.page 在 ShiroMail 里的域名 id（站点 id 1 下唯一域名）
 REGISTER_URL = "https://qoder.com/users/sign-up"
 SUCCESS_URL_MARK = "/download"
-DEVICE_CLIENT_ID = "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb"
+# 桌面端 Qoder.app 0.4.3（2026-10 逆向）改用的新 device-flow client_id；
+# 旧值 e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb 保留作回退
+DEVICE_CLIENT_ID = "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa"
+DEVICE_CLIENT_ID_FALLBACK = "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb"
 DEVICE_VERIFIER_CHARS = string.ascii_letters + string.digits + "-._~"
+DEVICE_VERIFIER_LEN = 64  # 新版固定 64 字符（旧 CLI 为 43~128 随机）
 
 # 服务状态（单例，多任务）
 _REGISTRAR: dict[str, Any] = {
@@ -133,29 +144,121 @@ _VQ = VerifierQueue()
 
 
 # ---------------------------------------------------------------------------
-# YYDS Mail 集成
+# .env 读取（环境变量优先，其次项目根 .env）
 # ---------------------------------------------------------------------------
-def _yyds_key() -> str | None:
-    """读取 YYDS_API_KEY：环境变量或项目根 .env。"""
-    key = (os.getenv("YYDS_API_KEY") or "").strip()
-    if key:
-        return key
+def _env(name: str) -> str | None:
+    val = (os.getenv(name) or "").strip()
+    if val:
+        return val
     try:
         env_path = APP_DIR / ".env"
         if env_path.exists():
             for raw in env_path.read_text(encoding="utf-8").splitlines():
                 line = raw.strip()
-                if line.startswith("YYDS_API_KEY="):
-                    key = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    if key:
-                        os.environ.setdefault("YYDS_API_KEY", key)
-                        return key
+                if line.startswith(f"{name}="):
+                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if val:
+                        os.environ.setdefault(name, val)
+                        return val
     except Exception:
         pass
     return None
 
 
-def yyds_create_mailbox(prefix: str = "qoder", task_id: str | None = None) -> str:
+def _yyds_key() -> str | None:
+    return _env("YYDS_API_KEY")
+
+
+def mail_provider() -> str:
+    return (_env("MAIL_PROVIDER") or "shiro").strip().lower()
+
+
+# ---------------------------------------------------------------------------
+# ShiroMail 集成（自建邮局，默认提供方）
+# ---------------------------------------------------------------------------
+def _shiro_headers() -> dict[str, str]:
+    key = _env("SHIRO_API_KEY")
+    if not key:
+        raise RuntimeError("SHIRO_API_KEY 未配置：请在项目根 .env 或环境变量设置（sk_live- 开头）")
+    return {"Authorization": f"Bearer {key}", "accept": "application/json"}
+
+
+def shiro_create_mailbox(prefix: str = "qoder", task_id: str | None = None) -> tuple[str, str]:
+    """建邮箱，返回 (address, mailbox_id)。"""
+    base = (_env("SHIRO_BASE_URL") or SHIRO_API).rstrip("/")
+    domain_id = int(_env("SHIRO_DOMAIN_ID") or SHIRO_DOMAIN_ID)
+    hours = int(_env("SHIRO_MAILBOX_HOURS") or 24)
+    local = prefix + uuid.uuid4().hex[:8]
+    r = httpx.post(
+        f"{base}/api/v1/mailboxes",
+        headers={**_shiro_headers(), "Content-Type": "application/json"},
+        json={"localPart": local, "domainId": domain_id, "expiresInHours": hours},
+        timeout=20,
+    )
+    r.raise_for_status()
+    data = r.json()
+    address, mailbox_id = data.get("address", ""), str(data.get("id", ""))
+    if not address or not mailbox_id:
+        raise RuntimeError(f"ShiroMail 建邮箱返回异常: {str(data)[:200]}")
+    _log(task_id, f"[mail] created {address} (mailbox {mailbox_id}, {hours}h)")
+    return address, mailbox_id
+
+
+def _shiro_extract_code(item: dict, base: str) -> str | None:
+    server = item.get("verificationCode")
+    if server:
+        return str(server)
+    blob = " ".join(filter(None, (item.get("subject"), item.get("textPreview"), item.get("htmlPreview"))))
+    codes = re_digit.findall(blob)
+    if codes:
+        return codes[0]
+    # 概览里没有则拉详情（textBody/htmlBody）
+    try:
+        d = httpx.get(
+            f"{base}/api/v1/mailboxes/{item.get('mailboxId', item.get('_mailboxId', ''))}/messages/{item['id']}",
+            headers=_shiro_headers(), timeout=20,
+        )
+        if d.status_code == 200:
+            detail = d.json()
+            body = " ".join(str(detail.get(k) or "") for k in ("subject", "textBody", "htmlBody"))
+            body = re.sub(r"<[^>]+>", " ", body)
+            codes = re_digit.findall(body)
+            if codes:
+                return codes[0]
+    except Exception:
+        pass
+    return None
+
+
+def shiro_wait_code(mailbox_id: str, task_id: str | None = None, timeout: float = 150.0) -> str:
+    base = (_env("SHIRO_BASE_URL") or SHIRO_API).rstrip("/")
+    deadline = time.time() + timeout
+    seen: set[str] = set()
+    while time.time() < deadline:
+        try:
+            r = httpx.get(f"{base}/api/v1/mailboxes/{mailbox_id}/messages", headers=_shiro_headers(), timeout=20)
+            if r.status_code == 200:
+                for item in (r.json().get("items") or []):
+                    if item.get("id") in seen:
+                        continue
+                    seen.add(item.get("id"))
+                    code = _shiro_extract_code(item, base)
+                    if code:
+                        _log(task_id, f"[mail] verification code = {code}")
+                        return code
+                    _log(task_id, "[mail] got message but no code, keep polling...")
+            else:
+                _log(task_id, f"[mail] unexpected status {r.status_code}")
+        except httpx.HTTPError as e:
+            _log(task_id, f"[mail] poll error: {e}")
+        time.sleep(3)
+    raise TimeoutError(f"no verification code within {timeout:.0f}s for mailbox {mailbox_id}")
+
+
+# ---------------------------------------------------------------------------
+# YYDS Mail 集成（可选提供方，MAIL_PROVIDER=yyds）
+# ---------------------------------------------------------------------------
+def yyds_create_mailbox(prefix: str = "qoder", task_id: str | None = None) -> tuple[str, str]:
     key = _yyds_key()
     if not key:
         raise RuntimeError(
@@ -171,7 +274,7 @@ def yyds_create_mailbox(prefix: str = "qoder", task_id: str | None = None) -> st
     r.raise_for_status()
     address = r.json()["data"]["address"]
     _log(task_id, f"[mail] created {address}")
-    return address
+    return address, ""
 
 
 re_digit = re.compile(r"(?<!\d)(\d{6})(?!\d)")
@@ -217,23 +320,41 @@ def yyds_wait_code(address: str, task_id: str | None = None, timeout: float = 12
 
 
 # ---------------------------------------------------------------------------
+# 邮箱提供方统一入口：create_mailbox() -> (address, mail_id)，wait_code(mail_id)
+# ---------------------------------------------------------------------------
+def create_mailbox(prefix: str = "qoder", task_id: str | None = None) -> tuple[str, str]:
+    if mail_provider() == "yyds":
+        return yyds_create_mailbox(prefix, task_id)
+    return shiro_create_mailbox(prefix, task_id)
+
+
+def wait_code(mail_id: str, task_id: str | None = None, timeout: float = 150.0) -> str:
+    if mail_provider() == "yyds":
+        return yyds_wait_code(mail_id, task_id, timeout)
+    return shiro_wait_code(mail_id, task_id, timeout)
+
+
+# ---------------------------------------------------------------------------
 # Device flow（来自 qodercli 逆向：docs/qoder-protocol-research.md §4）
 # ---------------------------------------------------------------------------
 def device_flow_params(machine_id: str | None = None) -> dict:
-    length = random.randint(43, 128)
-    verifier = "".join(random.choices(DEVICE_VERIFIER_CHARS, k=length))
+    """构造 PKCE device-flow 参数（对齐 Qoder.app 0.4.3：64 字符 verifier、新 client_id、可选 redirect_uri）。"""
+    verifier = "".join(random.choices(DEVICE_VERIFIER_CHARS, k=DEVICE_VERIFIER_LEN))
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
     nonce = str(uuid.uuid4())
     mid = machine_id or str(uuid.uuid4())
+    client_id = _env("QODER_DEVICE_CLIENT_ID") or DEVICE_CLIENT_ID
+    redirect_uri = _env("QODER_DEVICE_REDIRECT_URI")  # 例如 qoder-app://，默认不带走直连流程
+    extra = f"&redirect_uri={redirect_uri}" if redirect_uri else ""
     auth_url = (
         f"https://qoder.com/device/selectAccounts?challenge={challenge}"
-        f"&challenge_method=S256&nonce={nonce}&machine_id={mid}&client_id={DEVICE_CLIENT_ID}"
+        f"&challenge_method=S256&nonce={nonce}&machine_id={mid}&client_id={client_id}{extra}"
     )
     poll_url = (
         f"https://openapi.qoder.sh/api/v1/deviceToken/poll"
         f"?nonce={nonce}&verifier={verifier}&challenge_method=S256"
     )
-    return {"verifier": verifier, "nonce": nonce, "auth_url": auth_url, "poll_url": poll_url}
+    return {"verifier": verifier, "nonce": nonce, "auth_url": auth_url, "poll_url": poll_url, "client_id": client_id}
 
 
 def poll_device_token(poll_url: str, task_id: str | None = None, timeout: float = 300.0) -> dict:
@@ -297,6 +418,16 @@ def _free_port() -> int:
 # ---------------------------------------------------------------------------
 # DrissionPage 注册机（每任务一个实例）
 # ---------------------------------------------------------------------------
+
+# 常见桌面 Chrome UA 池（指纹多样化用）
+_CHROME_UAS = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+)
+
 class RegistrarBot:
     def __init__(self, task_id: str = "t1", verifier_queue: VerifierQueue | None = None,
                  profile_dir: str | None = None, cleanup_profile: bool = False) -> None:
@@ -306,6 +437,35 @@ class RegistrarBot:
         self.vq = verifier_queue or _VQ
         co = ChromiumOptions()
         co.set_local_port(_free_port())  # 独立调试端口，杜绝实例串扰
+        args = ["--no-first-run", "--disable-gpu", "--disable-background-networking",
+                "--disable-default-apps", "--disable-extensions", "--disable-sync"]
+        if sys.platform == "linux":
+            # root 运行必须 no-sandbox;小 /dev/shm 兜底;无显示时再叠 headless
+            # (注:Chrome 155 + DrissionPage 的 headless=new 有断连 bug,服务器用 Xvfb 更稳)
+            args += ["--no-sandbox", "--disable-dev-shm-usage", "--window-size=1280,800"]
+            if not os.environ.get("DISPLAY"):
+                args += ["--headless=new"]
+        for arg in args:
+            try:
+                co.set_argument(arg)
+            except Exception:
+                pass
+        # 指纹多样化：随机窗口尺寸 + UA（每实例不同，降低批量关联特征）
+        try:
+            w = random.choice((1280, 1366, 1440, 1512, 1600, 1920))
+            h = random.choice((720, 768, 800, 900, 982))
+            co.set_window_size(w, h)
+            co.set_user_agent(random.choice(_CHROME_UAS))
+        except Exception:
+            pass
+        # 代理池：REG_PROXY（单个）或 REG_PROXY_POOL（逗号分隔，按任务轮换，协议 http/https）
+        pool = [p.strip() for p in (_env("REG_PROXY_POOL") or _env("REG_PROXY") or "").split(",") if p.strip()]
+        if pool:
+            try:
+                co.set_proxy(random.choice(pool))
+                _log(task_id, f"[browser] proxy pool active ({len(pool)} proxies)")
+            except Exception as e:
+                _log(task_id, f"[browser] proxy set failed: {e}")
         if profile_dir:
             self.profile_dir = profile_dir
         else:
@@ -445,7 +605,7 @@ class RegistrarBot:
     def register(self) -> dict:
         page = self.page
         tid = self.task_id
-        address = yyds_create_mailbox(task_id=tid)
+        address, mail_id = create_mailbox(task_id=tid)
         first, last = _random_name()
         password = _random_password()
         _log(tid, f"[reg] name={first} {last}  mail={address}")
@@ -470,46 +630,95 @@ class RegistrarBot:
         self._click_submit()
         _log(tid, "[reg] submitted password step")
 
-        # 人机验证：排队 + 置顶显示一次，划完自动隐藏（轮询等待，可被 stop 中断）
+        # 人机验证：优先自动破解（图像匹配，2026-10 实测可过），失败转人工置顶
         _set_task(tid, "waiting_slider")
-        self.vq.acquire(tid)
-        self.window_show_top()
-        _log(tid, ">>> 请在本机浏览器完成人机验证（窗口已置顶）<<<")
-        try:
-            otp_deadline = time.time() + 300
-            otp_seen = False
-            while time.time() < otp_deadline:
-                if _REGISTRAR["stop_requested"]:
-                    raise RuntimeError("用户请求停止注册")
-                try:
-                    if page.ele('css:input[aria-label^="OTP Input"]', timeout=2):
-                        otp_seen = True
+        if _env("SLIDER_AUTO") != "0":
+            try:
+                from .slider import auto_solve_slider
+                if auto_solve_slider(page, log=lambda m: _log(tid, m)):
+                    _log(tid, "[verify] 滑块自动通过")
+                else:
+                    _log(tid, "[verify] 自动破解未成功，转人工")
+            except ImportError as e:
+                _log(tid, f"[verify] 自动破解不可用（{e}），转人工")
+            except Exception as e:
+                _log(tid, f"[verify] 自动破解异常: {e}，转人工")
+
+        def _otp_ready() -> bool:
+            if SUCCESS_URL_MARK in page.url:
+                return True
+            try:
+                el = page.ele('css:input[aria-label^="OTP Input"]', timeout=0.5)
+                if el:
+                    return True
+            except Exception:
+                pass
+            try:
+                single = page.ele('css:input.ant-input', timeout=0.5)
+                return bool(single and single.states.is_displayed)
+            except Exception:
+                return False
+
+        if _env("SLIDER_MANUAL") == "0":
+            if not _otp_ready():
+                raise RuntimeError("滑块自动破解未通过(SLIDER_MANUAL=0,不转人工)")
+        elif not _otp_ready():
+            self.vq.acquire(tid)
+            self.window_show_top()
+            _log(tid, ">>> 请在本机浏览器完成人机验证（窗口已置顶）<<<")
+            try:
+                otp_deadline = time.time() + 300
+                otp_seen = False
+                while time.time() < otp_deadline:
+                    if _REGISTRAR["stop_requested"]:
+                        raise RuntimeError("用户请求停止注册")
+                    try:
+                        if page.ele('css:input[aria-label^="OTP Input"]', timeout=2):
+                            otp_seen = True
+                            break
+                        # 新版页面：单框 OTP（验证码邮件步骤）
+                        single = page.ele('css:input.ant-input', timeout=2)
+                        if single and single.states.is_displayed:
+                            otp_seen = True
+                            break
+                    except Exception:
+                        pass
+                    if SUCCESS_URL_MARK in page.url:
+                        otp_seen = False  # 直接跳转，无需 OTP
                         break
-                except Exception:
-                    pass
-                if SUCCESS_URL_MARK in page.url:
-                    otp_seen = False  # 直接跳转，无需 OTP
-                    break
-                time.sleep(0.5)
-            if otp_seen:
-                _log(tid, "[reg] OTP input appeared")
-            else:
-                _log(tid, "[reg] page jumped directly to download (no OTP)")
-        finally:
-            self.window_hide()
-            self.vq.release(tid)
-            _log(tid, "[verify] slider done, focus released")
+                    time.sleep(0.5)
+                if otp_seen:
+                    _log(tid, "[reg] OTP input appeared")
+                else:
+                    _log(tid, "[reg] page jumped directly to download (no OTP)")
+            finally:
+                self.window_hide()
+                self.vq.release(tid)
+                _log(tid, "[verify] slider done, focus released")
 
         _set_task(tid, "waiting_otp")
-        code = yyds_wait_code(address, task_id=tid, timeout=120)
+        code = wait_code(mail_id, task_id=tid, timeout=150)
 
+        # OTP 填码：新版页面为单个文本框（input.ant-input），旧版为分段
+        # input[aria-label^="OTP Input"] 数组——两者都兼容（2026-10 实测）
         otp_inputs = page.eles('css:input[aria-label^="OTP Input"]')
         if otp_inputs:
             for i, ch in enumerate(code[: len(otp_inputs)]):
                 otp_inputs[i].input(ch)
-            _log(tid, f"[reg] OTP filled: {code}")
+            _log(tid, f"[reg] OTP filled (segmented): {code}")
         else:
-            page.ele('css:input[aria-label^="OTP Input"]').input(code)
+            single = None
+            for el in page.eles('css:input.ant-input'):
+                try:
+                    if el.states.is_displayed and not (el.attr("value") or ""):
+                        single = el
+                        break
+                except Exception:
+                    continue
+            if single is None:
+                raise RuntimeError("未找到 OTP 输入框（分段/单框均无）")
+            single.input(code)
+            _log(tid, f"[reg] OTP filled (single input): {code}")
 
         deadline = time.time() + 30
         while time.time() < deadline:
@@ -521,10 +730,10 @@ class RegistrarBot:
         return {"email": address, "password": password, "name": f"{first} {last}"}
 
     # ---- Device 授权（全程后台隐藏，自动点"继 续"，点击后 2s 无变化重试） ----
-    def device(self) -> dict:
+    def device(self, machine_id: str | None = None) -> dict:
         page = self.page
         tid = self.task_id
-        flow = device_flow_params()
+        flow = device_flow_params(machine_id=machine_id)
         _log(tid, f"[dev] auth URL:\n  {flow['auth_url']}")
 
         self._open_hidden(flow["auth_url"])  # 全程隐藏，不弹窗
@@ -648,7 +857,8 @@ def stop_registration() -> dict[str, Any]:
     return {"ok": True}
 
 
-def _run_parent(parent_id: str, workers: int = 3) -> None:
+def _run_parent(parent_id: str, workers: int | None = None) -> None:
+    workers = workers or int(_env("REG_WORKERS") or 3)
     """母线程：无限循环启动批次，每批 workers 个子任务并发；stop_requested 时停止。"""
     batch = 0
     try:
@@ -688,7 +898,7 @@ def _run_one(task_id: str) -> None:
         _set_task(task_id, "device_auth")
         dev = RegistrarBot(task_id=task_id, profile_dir=profile, cleanup_profile=True)
         try:
-            cred = dev.device()
+            cred = dev.device(machine_id=machine_profile(acct['email']).machine_id)
         finally:
             dev.close()
 

@@ -145,3 +145,73 @@ def start_refresh_loop() -> None:
         if _refresh_thread is None or not _refresh_thread.is_alive():
             _refresh_thread = threading.Thread(target=_refresh_loop, daemon=True)
             _refresh_thread.start()
+
+
+# ---------------------------------------------------------------------------
+# 账号余额(quota/usage)回写 + 定时刷新(Qoder 无签到端点;对应 Reso2api 的签到槽位机制)
+# ---------------------------------------------------------------------------
+QUOTA_REFRESH_SLOTS = (9 * 60, 21 * 60)  # 每天 09:00 / 21:00 本地时间刷新
+
+
+def update_account_quota(uid: str) -> dict:
+    """拉取 quota/usage 并回写 accounts 表,返回摘要。"""
+    with get_db() as conn:
+        row = conn.execute("SELECT security_oauth_token FROM accounts WHERE uid = ?", (uid,)).fetchone()
+    if not row:
+        return {"ok": False, "error": "账号不存在"}
+    tok = (row["security_oauth_token"] or "").strip()
+    try:
+        r = httpx.get(f"{OPENAPI}/api/v2/quota/usage",
+                      headers={**_headers(), "Authorization": f"Bearer {tok}"}, timeout=25)
+        if r.status_code != 200:
+            return {"ok": False, "error": f"HTTP {r.status_code}"}
+        d = r.json()
+        q = d.get("userQuota") or {}
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE accounts SET quota_total=?, quota_used=?, quota_remaining=?, quota_exceeded=?, quota_updated_at=?, user_type2=? WHERE uid=?",
+                (q.get("total", 0), q.get("used", 0), q.get("remaining", 0),
+                 1 if d.get("isQuotaExceeded") else 0,
+                 time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), d.get("userType", ""), uid),
+            )
+        return {"ok": True, "remaining": q.get("remaining", 0), "total": q.get("total", 0)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:120]}
+
+
+def refresh_all_quotas() -> dict:
+    with get_db() as conn:
+        uids = [r[0] for r in conn.execute("SELECT uid FROM accounts WHERE enabled = 1").fetchall()]
+    ok = failed = 0
+    for uid in uids:
+        r = update_account_quota(uid)
+        ok += bool(r.get("ok"))
+        failed += not r.get("ok")
+    return {"ok": ok, "failed": failed, "total": len(uids)}
+
+
+def _quota_refresh_loop() -> None:
+    """每天 09:00/21:00 刷新全部账号余额(精确分钟槽位,不轮询空转)。"""
+    import datetime as _dt
+    last_slot = None
+    while True:
+        now = _dt.datetime.now()
+        cur = now.hour * 60 + now.minute
+        slots_today = [sm for sm in QUOTA_REFRESH_SLOTS if sm <= cur]
+        cur_slot = (now.strftime("%Y%m%d"), max(slots_today) if slots_today else None)
+        if cur_slot[1] is not None and cur_slot != last_slot:
+            last_slot = cur_slot
+            try:
+                res = refresh_all_quotas()
+                print(f"[quota-refresh] ok={res['ok']} failed={res['failed']}", flush=True)
+            except Exception as e:
+                print(f"[quota-refresh] error: {e}", flush=True)
+        time.sleep(30)
+
+
+def start_quota_refresh_loop() -> None:
+    threading.Thread(target=_quota_refresh_loop, daemon=True).start()
+    try:
+        refresh_all_quotas()
+    except Exception:
+        pass

@@ -156,6 +156,32 @@ def batch_import_accounts(records: list[dict]) -> dict:
     return {"imported": imported, "skipped": skipped}
 
 
+
+def _session_from_account(account: dict) -> SessionContext:
+    identity = AuthIdentity(
+        name=account["name"],
+        aid=account["uid"],
+        uid=account["uid"],
+        yx_uid="",
+        organization_id="",
+        organization_name="",
+        user_type=account["user_type"],
+        security_oauth_token=account["security_oauth_token"],
+        refresh_token=account["refresh_token"]
+    )
+    _, machine_token, machine_type = new_machine()
+    return new_session(identity, account["machine_id"], machine_token, machine_type)
+
+
+def get_session_for_uid(uid: str) -> SessionContext:
+    """粘性路由用:取指定 uid 的会话(账号需 enabled)。"""
+    with get_db() as conn:
+        res = conn.execute("SELECT * FROM accounts WHERE uid = ? AND enabled = 1", (uid,)).fetchone()
+    if not res:
+        raise ValueError(f"Account {uid} is not enabled or does not exist")
+    return _session_from_account(dict(res))
+
+
 def get_active_session() -> SessionContext:
     """Gets the session for the active account from database."""
     active_uid = db_get_settings("active_uid")

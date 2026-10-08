@@ -1,136 +1,101 @@
-<h1 align="center">QoderGate</h1>
+# QoderFarm 🚜
 
-<p align="center">
-  把多个 Qoder 账号统一转换成 OpenAI 兼容接口的本地网关。<br>
-  A local gateway that turns multiple Qoder accounts into one OpenAI-compatible API.
-</p>
+Qoder 账号池网关 + 全自动注册机:把批量注册的 Qoder 免费账号变成 **OpenAI 兼容 API**(无限 `lite` 档),带指纹伪装、滑块自动破解、调用日志、余额面板。
 
-<p align="center">
-  <img src="https://img.shields.io/badge/python-%3E%3D3.11-blue?logo=python&logoColor=white" alt="Python >= 3.11">
-  <img src="https://img.shields.io/badge/fastapi-0.115+-green?logo=fastapi&logoColor=white" alt="FastAPI">
-  <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
-  <a href="https://linux.do"><img src="https://img.shields.io/badge/LINUX_DO-%E7%A4%BE%E5%8C%BA-blue" alt="LINUX DO"></a>
-</p>
+> 基于 [bzym2/QoderGateway](https://github.com/bzym2/QoderGateway)(MIT)深度改造,上游原版说明见 [README.upstream.md](README.upstream.md)。逆向研究见 [docs/qoder-protocol-research-2026-10.md](docs/qoder-protocol-research-2026-10.md)。
 
----
+## ✨ 能力总览
 
-## 致谢 / Acknowledgment
+| 模块 | 说明 |
+|---|---|
+| **OpenAI 兼容网关** | `/v1/chat/completions`(流式 SSE/非流式)、`/v1/models`,粘性路由 + 轮转容灾 |
+| **全自动注册机** | ShiroMail 邮箱 → 表单 → **阿里滑块图像破解** → OTP → device 凭据,一键入库 |
+| **虚拟机器指纹** | 种子化虚拟机(hostname/OS/CPU/DMI/时区,禁大陆港澳),同号恒定跨号互异 |
+| **账号池调度** | 会话粘性(50 次/2h)、每账号并发闸、429 冷却、MaxRotate 轮转 |
+| **余额/调用日志** | 每账号 Credits 列 + 09:00/21:00 定时刷新;请求级日志(模型/账号/TTFB/tokens)SQLite 持久 |
+| **WebUI** | Dashboard / 账号池 / **Requests 调用日志** / Playground / API Key / 自动注册机 |
 
-本项目思路来源于 [cubk1/qoder2api](https://github.com/cubk1/qoder2api/)，在此基础上用 Python 重写了后端并新增了 WebUI 管理控制台、SQLite 持久化、多账号池轮转和独立文档站。
+## 🤖 滑块自动破解(核心亮点)
 
-This project is inspired by [cubk1/qoder2api](https://github.com/cubk1/qoder2api/). We rewrote the backend in Python and added a WebUI management console, SQLite persistence, multi-account pool rotation, and a standalone documentation site.
+阿里 Captcha(PUZZLE 类型)全自动通过,无人工:
 
-特别感谢 [LINUX DO](https://linux.do) 社区提供的交流与推广平台。
+- DOM 提取底图 + 竖条拼图 → **掩码边缘 NCC + 亮度凹陷双信号融合**定位缺口(±2px,离线 5 样本 5/5)
+- ddddocr / 视觉模型 / 像素 NCC 全部实测不可用(对照数据见研究文档)
+- 失败自动刷新换图 + 偏移扫描重试(≤14 次),实测单账号 1.5~4 分钟
+- 纯算法依赖(numpy + Pillow),不调外部 API
 
-Special thanks to the [LINUX DO](https://linux.do) community for the platform of exchange and promotion.
+## 📊 额度真相(2026-10 实测)
 
-## 功能 / Features
+- 免费号 = **`lite` 档无限用**(0 credits 照样 200);`auto/ultimate/performance/efficient` 档需 credits(402)
+- 300 Credits = 一次性 **14 天 Pro 试用**,绑定"真实机器上最新版客户端首次登录",虚拟机不可领;**官方明示多开试用号会被封**
+- Qoder **无签到端点**(本网关用定时余额刷新替代签到槽位)
+- 部署实测:3 并发注册单账号 1.5~4 分钟;网关压测 20/20@5 并发零失败
 
-- **OpenAI 兼容接口** — 通过 `/v1/chat/completions` 向客户端提供标准 Chat Completions API
-- **多账号池** — 导入多个 Qoder 账号，按 UID 自动去重，请求失败时自动轮转
-- **两层鉴权** — 管理后台密钥与外部 API Key 分开配置
-- **SQLite 持久化** — 账号、API Key、全局配置全部存入本地数据库
-- **WebUI 控制台** — Dashboard、账号管理、API Key 管理、Playground、服务日志
-- **独立文档站** — `/documents` 提供中英文 Wiki，支持本地搜索和目录跳转
-- **自动检测语言** — 根据浏览器地区自动切换中文/英文
-
-## 快速开始 / Quickstart
-
-### 安装 / Install
+## 🚀 快速开始
 
 ```bash
-git clone https://github.com/bzym2/QoderGateway.git
-cd QoderGateway
+git clone https://github.com/Libra1337/qoder-farm.git && cd qoder-farm
 uv sync
+cd frontend && npm install && npm run build && cd ..   # 构建面板(可选)
+
+cp .env.example .env        # 管理密码/注册机邮箱配置
+uv run python -c "from qoder2api.app import main; main()"
+# 面板 http://127.0.0.1:5050/console  · API http://127.0.0.1:5050/v1/chat/completions
 ```
 
-### 前端构建 / Build Frontend
+注册机(独立 CLI):
 
 ```bash
-cd frontend
-npm install
-npm run build
-cd ..
+cd qodergate-register
+uv sync && cp .env.example .env   # 配 SHIRO_API_KEY(或 YYDS)
+uv run python -m qodergate_register --check
+uv run python -m qodergate_register --parents 2
 ```
 
-构建产物会输出到 `src/qoder2api/static/`，后端启动时直接托管 WebUI 与文档站。
+### 环境变量(节选)
 
-### 配置 / Configure
+| 变量 | 说明 |
+|---|---|
+| `QODER_ADMIN_PASSWORD` | 管理面板密码(gateway token) |
+| `QODER_ACCOUNT_CONCURRENCY` | 每账号并发(默认 2) |
+| `MAIL_PROVIDER` / `SHIRO_API_KEY` / `SHIRO_DOMAIN_ID` | 邮箱提供方(默认 shiro) |
+| `REG_PROXY_POOL` | 注册浏览器代理池(逗号分隔,**机房 IP 注册滑块难过,强烈建议挂住宅代理**) |
+| `SLIDER_MANUAL=0` | 无人值守:滑块失败快速换号不等人工 |
+| `REG_WORKERS` | 每母线程并发子任务数(默认 3) |
 
-```bash
-cp .env.example .env
-```
-
-编辑 `.env`，修改管理员密码：
-
-```env
-QODER_ADMIN_PASSWORD=your-strong-password
-```
-
-> **默认密码是 `admin`，强烈建议第一次登录后立即修改。**
-
-### 启动 / Start
-
-```bash
-uv run qoder2api
-```
-
-服务默认运行在 `http://127.0.0.1:5050/`。
-
-| 路径 | 说明 |
-|------|------|
-| `/` | Landing Page |
-| `/console` | 管理控制台 |
-| `/documents` | 文档站 / Wiki |
-| `/v1/chat/completions` | OpenAI 兼容 API |
-
-### 第一次 API 调用 / First API Call
-
-在控制台导入账号后：
-
-```bash
-curl http://127.0.0.1:5050/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "lite",
-    "messages": [{ "role": "user", "content": "Hello" }],
-    "stream": false
-  }'
-```
-
-## 环境变量 / Environment Variables
-
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `QODER_HOST` | 服务绑定地址 | `127.0.0.1` |
-| `QODER_PORT` | 服务端口 | `5050` |
-| `QODER_ADMIN_PASSWORD` | 管理员密码（覆盖 SQLite 存储值） | `admin` |
-| `QODER_PROXY` | 出站代理地址 | 空 |
-| `QODER_ENABLE_DOCUMENTS` | 是否启用文档页 | `1` |
-| `QODER_ENABLE_LANDING` | 是否启用 Landing Page | `1` |
-| `QODER_PAT` | 首次启动时自动导入的 PAT | 空 |
-
-## 项目结构 / Project Structure
+## 🗺️ 架构
 
 ```
-├── src/qoder2api/          # Python 后端
-│   ├── app.py              # FastAPI 路由
-│   ├── accounts.py         # SQLite 账号管理
-│   ├── auth.py             # Qoder 鉴权与签名
-│   ├── bridge.py           # OpenAI 兼容响应转换
-│   ├── config.py           # 配置读写
-│   ├── database.py         # SQLite schema
-│   ├── env.py              # 环境变量加载
-│   └── static/             # 前端构建产物
-├── frontend/               # React 前端源码
-│   ├── src/App.tsx         # 管理控制台
-│   ├── src/docs-main.tsx   # 文档站
-│   ├── src/landing-main.tsx# Landing Page
-│   └── src/docs/           # 中英文 Markdown 文档
-├── .env.example            # 环境变量模板
-└── pyproject.toml          # 项目配置
+客户端 → Caddy(TLS) → FastAPI 网关(127.0.0.1:5050)
+                          ├─ 粘性选号(LRU) → 每账号并发闸 → api2-v2.qoder.sh(纯 Bearer)
+                          ├─ 失败分类:401/403 轮转 · 429 冷却 60s · quota 二次确认
+                          ├─ reqlog(SQLite + 内存环)→ /ui/requests 面板
+                          └─ 内置注册机(Xvfb + Chrome)→ 滑块破解 → device flow → 入库
 ```
 
-## License
+生产部署参考(Debian 12 + Caddy + systemd + Xvfb):见 [docs/deploy.md](docs/deploy.md)。
 
-MIT
+## ✅ 已完成
+
+- [x] 协议逆向:Qoder.app 0.4.3(新 client_id / deviceToken/refresh / OTP 单框 / api2-v2)
+- [x] ShiroMail 邮箱集成 + 双注册机适配(独立 CLI + 网关内置)
+- [x] 阿里滑块全自动破解(双信号融合,离线 5/5,实测可过)
+- [x] 虚拟机器指纹(rec2api 移植)+ 稳定会话 ID + 日志脱敏
+- [x] 粘性路由 / 并发闸 / 冷却 / 首 token 预算(Reso2api 纪律移植)
+- [x] 多模态:裸 base64 魔数补前缀、assistant 图片挪 user 轮
+- [x] 面板:余额列 + Requests 调用日志 + 用量统计 + /v1/models
+- [x] 服务器部署(Debian 12 + Xvfb + Chrome 155 + systemd + Caddy 自动 TLS)+ 压测 20/20
+
+## 📌 TODO
+
+- [ ] **注册走代理池**:机房 IP 被阿里滑块零容差(几何/轨迹全部正常仍 14 连拒),接住宅代理后服务器即可全自动量产
+- [ ] **300C Pro 试用发放实验**:真实 Mac 客户端登录注册号验证试用授予路径;官方"多开试用号会封"需评估风控成本
+- [ ] premium 模型组(ultimate/performance/efficient)可用性:依赖账号有 credits(试用/付费),网关侧模型路由已就绪
+- [ ] 滑块求解器精度:攒 `slider_attempts.jsonl` 数据,拟合肥化权重(现单次 ~1/3 靠重试兜底)
+- [ ] Chrome 155 headless=new 与 DrissionPage 断连 bug 绕过(现用 Xvfb 替代)
+- [ ] 面板增加按日用量曲线图、账号签到式保活(每日一次 token exercise)
+- [ ] 调用日志 tokens 统计补全(lite 档上游不回 usage 帧,需从 raw_usage 解析)
+
+## ⚠️ 免责声明
+
+仅供学习研究。请遵守 Qoder 服务条款;注册机与试用规则对抗带来的账号风险自负。MIT License.

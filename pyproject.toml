@@ -9,7 +9,7 @@ dependencies = [
     "drissionpage>=4.1.1.4",
     "fastapi>=0.115.0",
     "httpx>=0.27.0",
-    "pypiwin32>=223",
+    "pypiwin32>=223; sys_platform == 'win32'",
     "uvicorn[standard]>=0.30.6",
 ]
 

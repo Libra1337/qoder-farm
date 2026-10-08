@@ -12,12 +12,13 @@ interface Account {
   refresh_token: string; machine_id: string; enabled: boolean; last_status: string
   last_error: string | null; quota: number; is_quota_exceeded: boolean
   plan: string | null; user_tag: string | null; next_reset_at: number | null
+  quota_total?: number; quota_used?: number; quota_remaining?: number; quota_exceeded?: number; quota_updated_at?: string | null; user_type2?: string | null
 }
 interface AccountsConfig { accounts: Account[]; active_uid: string | null }
 interface UIStatus { ready: boolean; mode: string; username: string | null; uid: string | null; user_type: string | null; error: string | null; accounts_count: number }
 interface APIConfig { auth_required: boolean; allowed_keys: string[] }
 interface Message { role: 'user' | 'assistant'; content: string }
-type TabId = 'dashboard' | 'accounts' | 'playground' | 'api-keys' | 'logs' | 'register'
+type TabId = 'dashboard' | 'accounts' | 'requests' | 'playground' | 'api-keys' | 'logs' | 'register'
 type AppTabId = TabId
 type Lang = 'en' | 'zh'
 type ToastType = 'SUCCESS' | 'ERROR' | 'INFO'
@@ -44,6 +45,7 @@ interface RegStatus {
 const NAV_ITEMS: { id: AppTabId; icon: string; label: string }[] = [
   { id: 'dashboard', icon: 'dashboard', label: 'Dashboard' },
   { id: 'accounts', icon: 'account_balance_wallet', label: 'Account Pool' },
+  { id: 'requests', icon: 'receipt_long', label: 'Requests' },
   { id: 'playground', icon: 'smart_toy', label: 'AI Playground' },
   { id: 'api-keys', icon: 'vpn_key', label: 'API Key Management' },
   { id: 'register', icon: 'person_add', label: 'Auto Registrar' },
@@ -343,6 +345,26 @@ export default function App() {
   const [showBatchImport, setShowBatchImport] = useState(false)
   const [batchJson, setBatchJson] = useState('')
   const [refreshingTokens, setRefreshingTokens] = useState(false)
+  const [reqLogs, setReqLogs] = useState<{ items: any[]; total: number; page: number } | null>(null)
+  const [usageStats, setUsageStats] = useState<any>(null)
+  const [reqPage, setReqPage] = useState(1)
+  const loadReqLogs = async (page = 1) => {
+    try {
+      const resp = await authedFetch(`/ui/requests?page=${page}&size=50`)
+      const data = await resp.json()
+      setReqLogs(data)
+      setReqPage(page)
+    } catch { }
+  }
+  const loadUsageStats = async () => {
+    try {
+      const resp = await authedFetch('/ui/usage/stats?days=7')
+      setUsageStats(await resp.json())
+    } catch { }
+  }
+  const doRefreshQuota = async () => {
+    try { await authedFetch('/ui/accounts/refresh-quota', { method: 'POST' }); await loadAccounts(); } catch { }
+  }
   const [quotaList, setQuotaList] = useState<{ uid: string; name: string; quota: { userQuota: { total: number; used: number; remaining: number; percentage: number } } }[] | null>(null)
 
   const [logFilterAccount, setLogFilterAccount] = useState('all')
@@ -527,11 +549,13 @@ export default function App() {
     fetchStatus(); fetchAccounts(); fetchApiConfig(); fetchLogs(); fetchRegStatus()
     const si = setInterval(fetchStatus, 6000)
     const li = setInterval(() => { if (activeTab === 'logs') fetchLogs() }, 3000)
+    const qi = setInterval(() => { if (activeTab === 'requests') { loadReqLogs(reqPage); loadUsageStats() } }, 5000)
     const ri = setInterval(() => { if (activeTab === 'register' && regStatus?.running) fetchRegStatus() }, 2000)
-    return () => { clearInterval(si); clearInterval(li); clearInterval(ri) }
+    return () => { clearInterval(si); clearInterval(li); clearInterval(ri); clearInterval(qi) }
   }, [token, activeTab, fetchStatus, fetchAccounts, fetchApiConfig, fetchLogs, fetchRegStatus, regStatus?.running])
 
   useEffect(() => { if (activeTab === 'logs') logEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [logs, activeTab])
+  useEffect(() => { if (activeTab === 'requests') { loadReqLogs(1); loadUsageStats() } }, [activeTab])
   useEffect(() => { if (activeTab === 'playground') chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [chatMessages, activeTab])
 
   // GSAP animations
@@ -969,6 +993,9 @@ export default function App() {
                   <button onClick={() => { setShowBatchImport(v => !v); setQuotaList(null) }} className={`flex items-center gap-2 px-4 py-2.5 rounded-lg transition-all font-bold text-sm border ${showBatchImport ? 'bg-ink text-white border-ink' : 'text-body hover:text-ink border-hairline'}`}>
                     <span className="material-symbols-outlined text-[18px]">file_upload</span>{lang === 'zh' ? '批量导入' : 'Batch Import'}
                   </button>
+                  <button onClick={doRefreshQuota} className="flex items-center gap-2 px-4 py-2.5 text-body hover:text-ink transition-colors font-bold text-sm">
+                    <span className="material-symbols-outlined text-[18px]">savings</span>{lang === 'zh' ? '刷新余额' : 'Refresh Credits'}
+                  </button>
                   <button onClick={doRefreshTokens} disabled={refreshingTokens} className="flex items-center gap-2 px-4 py-2.5 text-body hover:text-ink transition-colors font-bold text-sm disabled:opacity-40">
                     <span className="material-symbols-outlined text-[18px]">autorenew</span>{refreshingTokens ? (lang === 'zh' ? '刷新中...' : 'Refreshing...') : (lang === 'zh' ? '刷新 Token' : 'Refresh Tokens')}
                   </button>
@@ -1065,7 +1092,7 @@ export default function App() {
                             <tr key={acc.uid} className={`hover:bg-canvas-soft transition-colors group ${isActive ? 'bg-mint/5' : ''}`}>
                               <td className="px-6 py-5 font-bold text-ink"><div className="flex items-center gap-2">{acc.name}{isActive && <span className="text-[9px] bg-mint/20 text-ink px-1.5 py-0.5 rounded font-extrabold uppercase">Active</span>}</div></td>
                               <td className="px-6 py-5 font-mono text-xs text-body select-all">{acc.uid}</td>
-                              <td className="px-6 py-5"><div className="flex flex-col"><span className="text-xs font-semibold text-ink">{acc.user_tag || acc.plan || 'Trial'}</span><span className="text-[10px] text-body font-mono">Quota: {acc.quota}</span></div></td>
+                              <td className="px-6 py-5"><div className="flex flex-col"><span className="text-xs font-semibold text-ink">{acc.user_type2 || acc.user_tag || acc.plan || 'Trial'}</span><span className="text-[10px] text-body font-mono">Credits: {acc.quota_remaining ?? '--'} / {acc.quota_total ?? '--'}</span></div></td>
                               <td className="px-6 py-5">
                                 {acc.is_quota_exceeded ? <span className="px-3 py-1 text-[10px] font-bold rounded-full uppercase tracking-wider bg-red-100 text-red-700">Exceeded</span>
                                 : acc.last_status === 'ok' ? <span className="px-3 py-1 text-[10px] font-bold rounded-full uppercase tracking-wider bg-mint/20 text-ink">Enabled</span>
@@ -1215,6 +1242,77 @@ export default function App() {
           )}
 
           {/* ─── LOGS ─── */}
+          {activeTab === 'requests' && (
+            <div className="space-y-8">
+              <section className="grid grid-cols-2 md:grid-cols-5 gap-4 p-6 bg-white/60 border border-hairline rounded-2xl">
+                {[
+                  { label: lang === 'zh' ? '7天请求' : '7d Requests', value: usageStats?.total_requests ?? '--' },
+                  { label: lang === 'zh' ? '成功 / 失败' : 'OK / Err', value: usageStats ? `${usageStats.ok} / ${usageStats.err}` : '--' },
+                  { label: lang === 'zh' ? '7天 Credits' : '7d Credits', value: usageStats ? Number(usageStats.models?.reduce((a: number, m: any) => a + (m.credits || 0), 0)).toFixed(1) : '--' },
+                  { label: lang === 'zh' ? '7天 Tokens' : '7d Tokens', value: usageStats ? usageStats.models?.reduce((a: number, m: any) => a + (m.tokens || 0), 0) : '--' },
+                  { label: lang === 'zh' ? '日志总数' : 'Total Logs', value: reqLogs?.total ?? '--' },
+                ].map((c, i) => (
+                  <div key={i} className="space-y-1">
+                    <div className="text-[10px] font-bold text-body uppercase tracking-widest">{c.label}</div>
+                    <div className="text-2xl font-extrabold text-ink">{c.value}</div>
+                  </div>
+                ))}
+              </section>
+
+              <section className="bg-surface-card border border-hairline rounded-2xl overflow-hidden">
+                <div className="px-6 py-4 border-b border-hairline flex items-center gap-2">
+                  <span className="material-symbols-outlined text-[18px] text-body">receipt_long</span>
+                  <span className="text-sm font-semibold text-ink">{lang === 'zh' ? '调用日志(近 7 天)' : 'Request Logs (last 7d)'}</span>
+                  <div className="ml-auto flex items-center gap-3 text-[12px]">
+                    <button onClick={() => { loadReqLogs(Math.max(1, reqPage - 1)) }} disabled={!reqLogs || reqPage <= 1} className="text-body hover:text-ink disabled:opacity-30"><span className="material-symbols-outlined text-[16px]">chevron_left</span></button>
+                    <span className="text-body font-mono">{reqLogs ? `${reqPage} / ${Math.max(1, Math.ceil(reqLogs.total / 50))}` : '-'}</span>
+                    <button onClick={() => { if (reqLogs && reqPage < Math.ceil(reqLogs.total / 50)) loadReqLogs(reqPage + 1) }} disabled={!reqLogs || reqPage >= Math.ceil((reqLogs?.total || 1) / 50)} className="text-body hover:text-ink disabled:opacity-30"><span className="material-symbols-outlined text-[16px]">chevron_right</span></button>
+                    <button onClick={() => { loadReqLogs(reqPage); loadUsageStats() }} className="text-body hover:text-ink flex items-center gap-1"><span className="material-symbols-outlined text-[14px]">refresh</span>{lang === 'zh' ? '刷新' : 'Refresh'}</button>
+                  </div>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead className="bg-canvas-soft border-b border-hairline">
+                      <tr>{['Time', 'Model', 'Account', 'Status', 'Stream', 'TTFB', 'In/Out Tokens', 'Credits'].map((h, i) => (
+                        <th key={i} className="px-5 py-3 text-[10px] font-semibold text-body uppercase tracking-wider">{h}</th>
+                      ))}</tr>
+                    </thead>
+                    <tbody className="divide-y divide-hairline">
+                      {(reqLogs?.items || []).length === 0 ? (
+                        <tr><td colSpan={8} className="py-8 text-center text-xs text-body font-medium">{lang === 'zh' ? '暂无调用记录' : 'No requests yet'}</td></tr>
+                      ) : (reqLogs!.items || []).map((r: any, i: number) => (
+                        <tr key={i} className="hover:bg-canvas-soft transition-colors">
+                          <td className="px-5 py-3 text-xs font-mono text-body whitespace-nowrap">{new Date((r.ts || 0) * 1000).toLocaleString()}</td>
+                          <td className="px-5 py-3 text-xs font-bold text-ink">{r.model || '--'}</td>
+                          <td className="px-5 py-3 text-xs font-mono text-body">{(r.uid || '').slice(0, 13)}…</td>
+                          <td className="px-5 py-3"><span className={`px-2 py-0.5 text-[10px] font-bold rounded-full ${r.status === 200 ? 'bg-mint/20 text-ink' : 'bg-red-100 text-red-700'}`}>{r.status}</span></td>
+                          <td className="px-5 py-3 text-xs text-body">{r.stream ? 'SSE' : 'JSON'}</td>
+                          <td className="px-5 py-3 text-xs font-mono text-body">{r.ttfb_ms ?? '--'}ms</td>
+                          <td className="px-5 py-3 text-xs font-mono text-body">{r.in_tokens || 0} / {r.out_tokens || 0}</td>
+                          <td className="px-5 py-3 text-xs font-mono text-body">{r.credits || 0}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              {usageStats && (usageStats.models || []).length > 0 && (
+                <section className="bg-surface-card border border-hairline rounded-2xl p-6">
+                  <div className="text-[12px] font-semibold text-body mb-4 uppercase tracking-widest">{lang === 'zh' ? '按模型(7 天)' : 'By Model (7d)'}</div>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    {usageStats.models.map((m: any, i: number) => (
+                      <div key={i} className="border border-hairline rounded-xl p-4">
+                        <div className="text-sm font-bold text-ink">{m.model}</div>
+                        <div className="text-xs text-body mt-1">{lang === 'zh' ? '请求' : 'Reqs'}: {m.requests} · Tokens: {m.tokens} · Credits: {m.credits}</div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+            </div>
+          )}
+
           {activeTab === 'logs' && (
             <div className="space-y-8">
               <div className="relative z-[4000] grid grid-cols-1 md:grid-cols-4 gap-4 p-6 bg-white/60 backdrop-blur-md border border-hairline rounded-2xl">

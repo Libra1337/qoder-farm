@@ -8,13 +8,28 @@ from .env import load_dotenv
 
 load_dotenv()
 
-DB_PATH = Path.home() / ".qoder" / "qoder2api.db"
+DB_PATH = Path(os.getenv("QODER_DB") or (Path.home() / ".qoder" / "qoder2api.db"))
 
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _migrate_columns(conn) -> None:
+    """幂等加列:账号额度(2026-10)。"""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(accounts)")}
+    for col, ddl in (
+        ("quota_total", "REAL DEFAULT 0"),
+        ("quota_used", "REAL DEFAULT 0"),
+        ("quota_remaining", "REAL DEFAULT 0"),
+        ("quota_exceeded", "INTEGER DEFAULT 0"),
+        ("quota_updated_at", "TEXT"),
+        ("user_type2", "TEXT"),
+    ):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE accounts ADD COLUMN {col} {ddl}")
 
 
 def init_db():
@@ -76,6 +91,8 @@ def init_db():
             conn.execute("ALTER TABLE accounts ADD COLUMN token_expires_at TEXT")
         except Exception:
             pass
+
+        _migrate_columns(conn)
 
 
 init_db()
