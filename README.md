@@ -89,7 +89,7 @@ uv run python -m qodergate_register --parents 2
 ## 📌 TODO
 
 - [ ] **注册走代理池**:机房 IP 被阿里滑块零容差(几何/轨迹全部正常仍 14 连拒),接住宅代理后服务器即可全自动量产
-- [ ] **300C Pro 试用发放实验**:真实 Mac 客户端登录注册号验证试用授予路径;官方"多开试用号会封"需评估风控成本
+- [ ] **300C Pro 试用发放路径(实验过半,结论偏悲观)**:2026-10-08 实测——真实 Mac 上用真实客户端(0.4.3,device flow 完整走通)登录批量注册号,套餐仍 `PLAN_TIER_FREE`、0 credits,**未发放**;剩余假设:绑定 Qoder IDE(另一产品)首次启动 / 需完整 onboarding 建项目 / 服务端按风控延迟发放;官方 FAQ 明示试用绑定"最新版客户端首次登录+非虚拟机"且"多开试用号会封",继续深挖性价比存疑
 - [ ] premium 模型组(ultimate/performance/efficient)可用性:依赖账号有 credits(试用/付费),网关侧模型路由已就绪
 - [ ] 滑块求解器精度:攒 `slider_attempts.jsonl` 数据,拟合肥化权重(现单次 ~1/3 靠重试兜底)
 - [ ] Chrome 155 headless=new 与 DrissionPage 断连 bug 绕过(现用 Xvfb 替代)
