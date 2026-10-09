@@ -63,21 +63,90 @@ def record_req(model: str, uid: str, status: int, stream: bool,
     return rec
 
 
+_USAGE_IN_KEYS = ("prompt_tokens", "input_tokens", "prompttokens", "inputtokens",
+                  "prompt_token", "input_token")
+_USAGE_OUT_KEYS = ("completion_tokens", "output_tokens", "completiontokens", "outputtokens",
+                   "completion_token", "output_token")
+_USAGE_CREDIT_KEYS = ("credit", "credits")
+
+
+def _dig_usage(obj: Any, acc: dict[str, float]) -> None:
+    """在 usage 子树里递归查找 token 字段(兼容嵌套 / JSON 字符串 / 命名变体)。"""
+    if isinstance(obj, str):
+        s = obj.strip()
+        if s[:1] in ("{", "["):
+            try:
+                _dig_usage(json.loads(s), acc)
+            except ValueError:
+                pass
+        return
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            kl = str(k).lower()
+            if isinstance(v, bool):
+                continue
+            if isinstance(v, (int, float)):
+                if kl in _USAGE_IN_KEYS:
+                    acc["in_tokens"] = int(v)
+                elif kl in _USAGE_OUT_KEYS:
+                    acc["out_tokens"] = int(v)
+                elif kl in _USAGE_CREDIT_KEYS:
+                    acc["credits"] = float(v)
+            else:
+                _dig_usage(v, acc)
+    elif isinstance(obj, list):
+        for v in obj:
+            _dig_usage(v, acc)
+
+
+def _usage_subtrees(payload: dict) -> list[Any]:
+    """收集可能承载 usage 的子树:顶层 usage/raw_usage 与 choices[].usage/delta.usage。"""
+    out: list[Any] = []
+    for key in ("usage", "raw_usage", "usage_metadata", "token_usage"):
+        if key in payload:
+            out.append(payload[key])
+    choices = payload.get("choices")
+    if isinstance(choices, list):
+        for ch in choices:
+            if not isinstance(ch, dict):
+                continue
+            for key in ("usage", "raw_usage"):
+                if key in ch:
+                    out.append(ch[key])
+            delta = ch.get("delta")
+            if isinstance(delta, dict):
+                for key in ("usage", "raw_usage"):
+                    if key in delta:
+                        out.append(delta[key])
+    return out
+
+
 def parse_usage_frame(line: str) -> dict[str, int] | None:
-    """从 SSE data 行提取 usage(prompt/completion tokens)。保留最后出现的 usage。"""
+    """从 SSE data 行提取 usage(prompt/completion tokens + credits)。
+
+    上游(lite 档)不一定回标准 usage 帧,而是把统计放在 raw_usage(可能嵌套或 JSON 字符串),
+    字段名也可能是 input/output_tokens——故对 usage 子树做递归兼容查找。无统计时返回 None。
+    """
     if not line.startswith("data:"):
         return None
+    body = line[5:].strip()
+    if not body or body == "[DONE]":
+        return None
     try:
-        payload = json.loads(line[5:].strip())
+        payload = json.loads(body)
     except (ValueError, TypeError):
         return None
-    usage = payload.get("usage")
-    if not isinstance(usage, dict):
+    if not isinstance(payload, dict):
+        return None
+    acc: dict[str, float] = {}
+    for tree in _usage_subtrees(payload):
+        _dig_usage(tree, acc)
+    if not acc:
         return None
     return {
-        "in_tokens": int(usage.get("prompt_tokens") or 0),
-        "out_tokens": int(usage.get("completion_tokens") or 0),
-        "credits": float(usage.get("credit") or usage.get("credits") or 0.0),
+        "in_tokens": int(acc.get("in_tokens", 0)),
+        "out_tokens": int(acc.get("out_tokens", 0)),
+        "credits": float(acc.get("credits", 0.0)),
     }
 
 

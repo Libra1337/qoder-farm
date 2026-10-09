@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, createContext, useContext } from 'react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -55,13 +55,13 @@ const NAV_ITEMS: { id: AppTabId; icon: string; label: string }[] = [
 const UI_TEXT = {
   en: {
     nav: {
-      dashboard: 'Dashboard', accounts: 'Account Pool', playground: 'AI Playground', apiKeys: 'API Key Management', logs: 'Logs', register: 'Auto Registrar',
+      dashboard: 'Dashboard', accounts: 'Account Pool', requests: 'Requests', playground: 'AI Playground', apiKeys: 'API Key Management', logs: 'Logs', register: 'Auto Registrar',
     },
     breadcrumb: {
-      dashboard: 'Control Panel / Overview', accounts: 'Console / Management', playground: 'Playground / Experiment', apiKeys: 'Administration / Security', logs: 'System / Observability', docs: 'Developer Platform / Wiki', register: 'Automation / Registrar',
+      dashboard: 'Control Panel / Overview', accounts: 'Console / Management', requests: 'Control Panel / Requests', playground: 'Playground / Experiment', apiKeys: 'Administration / Security', logs: 'System / Observability', docs: 'Developer Platform / Wiki', register: 'Automation / Registrar',
     },
     title: {
-      dashboard: 'System Overview', accounts: 'Account Pool', playground: 'AI Playground', apiKeys: 'API Management', logs: 'Service Logs', docs: 'Documentation', register: 'Auto Registrar',
+      dashboard: 'System Overview', accounts: 'Account Pool', requests: 'Request Logs', playground: 'AI Playground', apiKeys: 'API Management', logs: 'Service Logs', docs: 'Documentation', register: 'Auto Registrar',
     },
     common: { docs: 'Docs', support: 'Support', healthy: 'Healthy', offline: 'Offline', signOut: 'Sign Out', refresh: 'Refresh', add: 'Add', delete: 'Delete', copy: 'Copy' },
     dashboard: {
@@ -103,13 +103,13 @@ const UI_TEXT = {
   },
   zh: {
     nav: {
-      dashboard: '控制台', accounts: '账号池', playground: '调试对话', apiKeys: 'API Key 管理', logs: '服务日志', register: '自动注册机',
+      dashboard: '控制台', accounts: '账号池', requests: '调用日志', playground: '调试对话', apiKeys: 'API Key 管理', logs: '服务日志', register: '自动注册机',
     },
     breadcrumb: {
-      dashboard: '控制台 / 概览', accounts: '控制台 / 账号管理', playground: '调试 / 对话测试', apiKeys: '管理 / 安全', logs: '系统 / 日志', docs: '开发者平台 / 文档', register: '自动化 / 注册机',
+      dashboard: '控制台 / 概览', accounts: '控制台 / 账号管理', requests: '控制台 / 调用日志', playground: '调试 / 对话测试', apiKeys: '管理 / 安全', logs: '系统 / 日志', docs: '开发者平台 / 文档', register: '自动化 / 注册机',
     },
     title: {
-      dashboard: '系统概览', accounts: '账号池', playground: '调试对话', apiKeys: 'API 管理', logs: '服务日志', docs: '文档', register: '自动注册机',
+      dashboard: '系统概览', accounts: '账号池', requests: '调用日志', playground: '调试对话', apiKeys: 'API 管理', logs: '服务日志', docs: '文档', register: '自动注册机',
     },
     common: { docs: '文档', support: '支持', healthy: '正常', offline: '未就绪', signOut: '退出', refresh: '刷新', add: '添加', delete: '删除', copy: '复制' },
     dashboard: {
@@ -156,10 +156,6 @@ const TOAST_STYLES: Record<ToastType, { bg: string; border: string; icon: string
   ERROR: { bg: 'bg-white', border: 'border-l-[3px] border-l-toast-error', icon: 'error', iconFill: 'text-toast-error' },
   INFO: { bg: 'bg-white', border: 'border-l-[3px] border-l-toast-info', icon: 'info', iconFill: 'text-toast-info' },
 }
-
-// ─── Toast Context ───
-
-const ToastCtx = createContext<{ push: (t: ToastType, title: string, message: string) => void }>({ push: () => {} })
 
 // ─── Custom UI Components ───
 
@@ -307,6 +303,66 @@ function ToastContainer({ toasts, dismiss }: { toasts: ToastItem[]; dismiss: (id
 
 // ─── Main App ───
 
+type DailyUsage = { day: string; requests: number; tokens: number; credits: number }
+
+/** 校验 /ui/usage/stats 的 daily 字段(外部输入)为强类型行。 */
+function asDailyUsage(rows: unknown): DailyUsage[] {
+  if (!Array.isArray(rows)) return []
+  const num = (v: unknown) => (typeof v === 'number' ? v : 0)
+  const out: DailyUsage[] = []
+  for (const r of rows) {
+    if (!r || typeof r !== 'object') continue
+    const rec = r as Record<string, unknown>
+    if (typeof rec.day !== 'string') continue
+    out.push({ day: rec.day, requests: num(rec.requests), tokens: num(rec.tokens), credits: num(rec.credits) })
+  }
+  return out
+}
+
+/** 按日用量曲线图(纯内联 SVG,无图表库依赖)。 */
+function DailyUsageChart({ daily, lang }: { daily: unknown; lang: Lang }) {
+  const data = asDailyUsage(daily)
+  if (data.length === 0) return null
+  const W = 760, H = 200, PAD = 28, TOP = 12, BOT = 28, PLOT_H = H - TOP - BOT, PLOT_W = W - 2 * PAD
+  const n = data.length
+  const maxReq = Math.max(1, ...data.map(d => d.requests))
+  const maxTok = Math.max(1, ...data.map(d => d.tokens))
+  // 坐标换算:自然 px 落在绘图区,顶部留白、底部留日期行
+  const xAt = (i: number) => PAD + (n === 1 ? PLOT_W / 2 : (i * PLOT_W) / (n - 1))
+  const yAt = (v: number, max: number) => TOP + PLOT_H * (1 - v / max)
+  const path = (vals: number[], max: number) =>
+    vals.map((v, i) => `${i === 0 ? 'M' : 'L'}${xAt(i).toFixed(1)},${yAt(v, max).toFixed(1)}`).join(' ')
+  const reqPath = path(data.map(d => d.requests), maxReq)
+  const tokPath = path(data.map(d => d.tokens), maxTok)
+  const baseline = yAt(0, maxReq).toFixed(1)
+  const area = `${reqPath} L${xAt(n - 1).toFixed(1)},${baseline} L${xAt(0).toFixed(1)},${baseline} Z`
+  return (
+    <section className="bg-surface-card border border-hairline rounded-2xl p-6">
+      <div className="flex items-center gap-4 mb-4">
+        <div className="text-[12px] font-semibold text-body uppercase tracking-widest">{lang === 'zh' ? '按日用量' : 'Daily Usage'}</div>
+        <div className="ml-auto flex items-center gap-4 text-[11px] text-body">
+          <span className="flex items-center gap-1"><span className="inline-block w-3 h-[2px]" style={{ background: '#10b981' }} />{lang === 'zh' ? '请求' : 'Requests'} (max {maxReq})</span>
+          <span className="flex items-center gap-1"><span className="inline-block w-3 h-[2px]" style={{ background: '#a8c8e8' }} />Tokens (max {maxTok})</span>
+        </div>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label="daily usage">
+        <path d={area} fill="#10b981" opacity="0.10" />
+        <path d={tokPath} fill="none" stroke="#a8c8e8" strokeWidth="2" strokeLinejoin="round" />
+        <path d={reqPath} fill="none" stroke="#10b981" strokeWidth="2" strokeLinejoin="round" />
+        {data.map((d, i) => (
+          <g key={d.day}>
+            <circle cx={xAt(i)} cy={yAt(d.requests, maxReq)} r="2.5" fill="#10b981" />
+            <title>{`${d.day}: ${d.requests} req · ${d.tokens} tok · ${d.credits.toFixed(1)} cr`}</title>
+          </g>
+        ))}
+        {data.map((d, i) => (
+          <text key={d.day} x={xAt(i)} y={H - 8} textAnchor="middle" fontSize="10" fill="#4e4e4e">{d.day}</text>
+        ))}
+      </svg>
+    </section>
+  )
+}
+
 export default function App() {
   const [lang, setLang] = useState<Lang>(() => {
     const stored = localStorage.getItem('qodergate_lang')
@@ -324,8 +380,6 @@ export default function App() {
   const [accountsConfig, setAccountsConfig] = useState<AccountsConfig>({ accounts: [], active_uid: null })
   const [apiConfig, setApiConfig] = useState<APIConfig>({ auth_required: false, allowed_keys: [] })
   const [logs, setLogs] = useState<string[]>([])
-  const [loading, setLoading] = useState(true)
-
   const [chatMessages, setChatMessages] = useState<Message[]>([
     { role: 'assistant', content: 'Hello! I am the QoderGate AI assistant. Ask me anything — I support Markdown and LaTeX math.' }
   ])
@@ -333,7 +387,6 @@ export default function App() {
   const [model, setModel] = useState('lite')
   const [stream, setStream] = useState(true)
   const [generating, setGenerating] = useState(false)
-  const [showThinking, setShowThinking] = useState(true)
 
   const [newKey, setNewKey] = useState('')
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
@@ -363,7 +416,16 @@ export default function App() {
     } catch { }
   }
   const doRefreshQuota = async () => {
-    try { await authedFetch('/ui/accounts/refresh-quota', { method: 'POST' }); await loadAccounts(); } catch { }
+    try { await authedFetch('/ui/accounts/refresh-quota', { method: 'POST' }); await fetchAccounts(); } catch { }
+  }
+  const doKeepalive = async () => {
+    try {
+      const resp = await authedFetch('/ui/accounts/keepalive', { method: 'POST' })
+      const data = await resp.json()
+      pushToast('INFO', lang === 'zh' ? '保活完成' : 'Keepalive done',
+        lang === 'zh' ? `成功 ${data.ok} / 失败 ${data.failed}` : `ok ${data.ok} / failed ${data.failed}`)
+      await fetchAccounts()
+    } catch { }
   }
   const [quotaList, setQuotaList] = useState<{ uid: string; name: string; quota: { userQuota: { total: number; used: number; remaining: number; percentage: number } } }[] | null>(null)
 
@@ -408,6 +470,7 @@ export default function App() {
   const navLabels: Record<AppTabId, string> = {
     dashboard: t.nav.dashboard,
     accounts: t.nav.accounts,
+    requests: t.nav.requests,
     playground: t.nav.playground,
     'api-keys': t.nav.apiKeys,
     logs: t.nav.logs,
@@ -416,6 +479,7 @@ export default function App() {
   const pageMeta: Record<AppTabId, { bc: string; title: string }> = {
     dashboard: { bc: t.breadcrumb.dashboard, title: t.title.dashboard },
     accounts: { bc: t.breadcrumb.accounts, title: t.title.accounts },
+    requests: { bc: t.breadcrumb.requests, title: t.title.requests },
     playground: { bc: t.breadcrumb.playground, title: t.title.playground },
     'api-keys': { bc: t.breadcrumb.apiKeys, title: t.title.apiKeys },
     logs: { bc: t.breadcrumb.logs, title: t.title.logs },
@@ -461,7 +525,7 @@ export default function App() {
   }, [token])
 
   const fetchStatus = useCallback(async () => {
-    try { const resp = await authedFetch('/ui/status'); const data = await resp.json(); setStatus(data) } catch { /* */ } finally { setLoading(false) }
+    try { const resp = await authedFetch('/ui/status'); const data = await resp.json(); setStatus(data) } catch { /* */ }
   }, [authedFetch])
   const fetchAccounts = useCallback(async () => {
     try { const resp = await authedFetch('/ui/accounts'); const data = await resp.json(); setAccountsConfig(data) } catch { /* */ }
@@ -611,7 +675,6 @@ export default function App() {
   const handleLogout = () => { localStorage.removeItem('gateway_token'); setToken(null); setLoginSuccess(false) }
 
   const handleImportAuth = async () => {
-    setLoading(true)
     try {
       const resp = await authedFetch('/ui/accounts/import', { method: 'POST' })
       if (!resp.ok) { const err = await resp.json(); throw new Error(err.detail || 'Import failed') }
@@ -620,7 +683,7 @@ export default function App() {
       fetchAccounts(); fetchStatus(); fetchLogs()
     } catch (err: any) {
       pushToast('ERROR', msg.importFailed, err.message)
-    } finally { setLoading(false) }
+    }
   }
 
   const handleSavePat = async () => {
@@ -996,6 +1059,9 @@ export default function App() {
                   <button onClick={doRefreshQuota} className="flex items-center gap-2 px-4 py-2.5 text-body hover:text-ink transition-colors font-bold text-sm">
                     <span className="material-symbols-outlined text-[18px]">savings</span>{lang === 'zh' ? '刷新余额' : 'Refresh Credits'}
                   </button>
+                  <button onClick={doKeepalive} className="flex items-center gap-2 px-4 py-2.5 text-body hover:text-ink transition-colors font-bold text-sm">
+                    <span className="material-symbols-outlined text-[18px]">favorite</span>{lang === 'zh' ? '保活' : 'Keepalive'}
+                  </button>
                   <button onClick={doRefreshTokens} disabled={refreshingTokens} className="flex items-center gap-2 px-4 py-2.5 text-body hover:text-ink transition-colors font-bold text-sm disabled:opacity-40">
                     <span className="material-symbols-outlined text-[18px]">autorenew</span>{refreshingTokens ? (lang === 'zh' ? '刷新中...' : 'Refreshing...') : (lang === 'zh' ? '刷新 Token' : 'Refresh Tokens')}
                   </button>
@@ -1258,6 +1324,8 @@ export default function App() {
                   </div>
                 ))}
               </section>
+
+              <DailyUsageChart daily={usageStats?.daily} lang={lang} />
 
               <section className="bg-surface-card border border-hairline rounded-2xl overflow-hidden">
                 <div className="px-6 py-4 border-b border-hairline flex items-center gap-2">

@@ -18,6 +18,10 @@ scripts/new_device_result.json
 scripts/.last_profile
 scripts/*.png
 
+# 滑块尝试记录（运行时数据，供 tools/slider_fit.py 离线校准）
+slider_attempts.jsonl
+tools/synth_photos/
+
 # qodergate-register 导出凭据
 accounts.json
 qodergate-register/accounts.json

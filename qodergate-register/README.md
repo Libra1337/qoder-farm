@@ -12,6 +12,10 @@ cd qodergate-register
 uv sync          # 或 pip install -e .
 ```
 
+浏览器:用 Playwright 驱动系统 Chrome(`REG_BROWSER_CHANNEL=chrome`,默认),无需 Xvfb。
+默认 headless(`SLIDER_MANUAL=0`);本地要人工滑滑块时设 `SLIDER_MANUAL=1` 或 `REG_HEADFUL=1` 走有头。
+若首次运行提示缺浏览器,可 `playwright install chromium`(或直接装 Chrome 用 channel=chrome)。
+
 ## 配置
 
 默认邮箱提供方为 **ShiroMail**（自建邮局 mail.futile.page）：
@@ -67,9 +71,11 @@ uv run python -m qodergate_register --parents 1 --output ./out.json
 ## 说明
 
 - **滑块自动破解（默认开启，`SLIDER_AUTO=0` 关闭）**：阿里 PUZZLE 滑块通过图像匹配自动通过
-  （掩码边缘 NCC + 亮度凹陷双信号融合,±2px 精度,离线 5 样本 5/5);每次失败自动刷新换图并做
-  ±3~15px 偏移扫描重试(最多 14 次),仍失败才转人工置顶。实测约 1/3 尝试即过、最差 14 次,
-  单账号全程 1.5~4 分钟。依赖 `numpy` + `Pillow`(已加入 pyproject)。
+  （掩码边缘 NCC + 掩码 RGB ZNCC 双信号融合,合成样本台单次命中 75~96%、接受集误差中位 0.0px);
+  每次失败自动刷新换图并做小幅偏移扫描重试(最多 14 次),仍失败才转人工置顶。单账号全程
+  1.5~4 分钟。依赖 `numpy` + `Pillow`(滑块)+ `playwright`(浏览器,已加入 pyproject)。
+- 可选严格一致性门 `SLIDER_AGREE_TOL`(默认关):开启后两信号不一致即换图重试,接受集精度 100%,
+  但单次命中降到 47~81%(被拒的尝试同样要重刷,净耗时更长)。风控优先时再开。
 - ddddocr 不适用本滑块(拼图是 52×200 竖条,slide_match 置信度 0.08、裁剪后仍偏 16px;
   det 找不到缺口;视觉模型单点定位偏 40px)——详见 `../docs/qoder-protocol-research-2026-10.md`。
 - 人机验证兜底（自动失败时）：窗口平时隐藏，验证时置顶弹出，划完自动隐藏（窗口置顶仅 Windows,
@@ -84,5 +90,6 @@ uv run python -m qodergate_register --parents 1 --output ./out.json
 - `REG_PROXY_POOL=http://user:pass@host:port,http://...` — 注册浏览器代理池,按任务随机轮换
   (单代理用 `REG_PROXY`;不出代理时所有账号同 IP 注册,是最主要的关联信号)
 - 每账号一次性临时 profile(等效无痕,用完即毁)+ 随机窗口尺寸/UA 指纹多样化
-- 滑块尝试记录自动追加 `slider_attempts.jsonl`(供后续离线调优)
+- 滑块尝试记录自动追加 `slider_attempts.jsonl`(默认项目根,`SLIDER_ATTEMPTS_PATH` 可覆盖;
+  含 `ncc_x/zncc_x/agree/conf/method/pass`,用 `tools/slider_fit.py` 复核门阈值与融合权重)
 - 实测吞吐:3 并发无人值守,单账号 1.5~3 分钟,单批 2/3~3/3 成功

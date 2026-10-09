@@ -430,7 +430,7 @@ def _free_port() -> int:
 
 
 # ---------------------------------------------------------------------------
-# DrissionPage 注册机（每任务一个实例）
+# Playwright 注册机（每任务一个实例；浏览器适配层见 qoder2api/browser.py）
 # ---------------------------------------------------------------------------
 
 # 常见桌面 Chrome UA 池（指纹多样化用）
@@ -446,7 +446,7 @@ class RegistrarBot:
     def __init__(self, task_id: str = "t1", verifier_queue: VerifierQueue | None = None,
                  profile_dir: str | None = None, cleanup_profile: bool = False,
                  proxy: str | None = None) -> None:
-        from DrissionPage import ChromiumOptions, ChromiumPage
+        from .browser import ChromiumOptions, ChromiumPage
 
         self.task_id = task_id
         self.vq = verifier_queue or _VQ
@@ -455,12 +455,8 @@ class RegistrarBot:
         co.set_local_port(_free_port())  # 独立调试端口，杜绝实例串扰
         args = ["--no-first-run", "--disable-gpu", "--disable-background-networking",
                 "--disable-default-apps", "--disable-extensions", "--disable-sync"]
-        if sys.platform == "linux":
-            # root 运行必须 no-sandbox;小 /dev/shm 兜底;无显示时再叠 headless
-            # (注:Chrome 155 + DrissionPage 的 headless=new 有断连 bug,服务器用 Xvfb 更稳)
-            args += ["--no-sandbox", "--disable-dev-shm-usage", "--window-size=1280,800"]
-            if not os.environ.get("DISPLAY"):
-                args += ["--headless=new"]
+        # 浏览器适配层自行处理 headless(默认按 SLIDER_MANUAL 判定)与 Linux no-sandbox,
+        # 无需 Xvfb:Playwright 官方 headless 直接可用(Chrome 154+ 下 DrissionPage 会握手 404)
         for arg in args:
             try:
                 co.set_argument(arg)
@@ -550,14 +546,18 @@ class RegistrarBot:
     def _locate(self, selector: str, timeout: float | None = None,
                 desc: str = "", displayed: bool = False) -> Any:
         """定位元素；找不到时在控制台输出具体是哪个元素找不到，并抛出带定位符的错误。"""
-        from DrissionPage.errors import ElementNotFoundError, WaitTimeoutError
+        from .browser import ElementNotFoundError, WaitTimeoutError
         try:
             if displayed:
                 self.page.wait.ele_displayed(selector, timeout=timeout or 10)
-                return self.page.ele(selector)
-            if timeout is None:
-                return self.page.ele(selector)
-            return self.page.ele(selector, timeout=timeout)
+                el = self.page.ele(selector)
+            elif timeout is None:
+                el = self.page.ele(selector)
+            else:
+                el = self.page.ele(selector, timeout=timeout)
+            if el is None:  # 适配层找不到时返回 None(而非抛错)
+                raise ElementNotFoundError(selector)
+            return el
         except (ElementNotFoundError, WaitTimeoutError):
             label = f"（{desc}）" if desc else ""
             msg = f"找不到元素: {selector}{label}"
