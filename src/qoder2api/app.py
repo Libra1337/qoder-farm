@@ -36,6 +36,8 @@ from .tokens import (
     update_account_quota,
     refresh_all_quotas,
     start_quota_refresh_loop,
+    start_keepalive_loop,
+    keepalive_once,
     refresh_all_account_tokens,
     refresh_one_account,
     get_account_quota,
@@ -56,6 +58,27 @@ _local_auth_error: str | None = None
 
 logs_queue = collections.deque(maxlen=150)
 init_reqlog_db()
+
+_bg_started = False
+
+
+def _start_background_loops() -> None:
+    """启动后台线程(幂等):token 刷新 / 余额刷新 / 每日保活。
+
+    放在 startup 事件里,使 `uvicorn qoder2api.app:app` 直跑也能起线程(旧版只在 main() 里起)。
+    """
+    global _bg_started
+    if _bg_started:
+        return
+    _bg_started = True
+    start_refresh_loop()
+    start_quota_refresh_loop()
+    start_keepalive_loop()
+
+
+@app.on_event("startup")
+async def _on_startup() -> None:
+    _start_background_loops()
 
 
 def add_log(msg: str, level: str = "INFO") -> None:
@@ -314,6 +337,14 @@ async def ui_refresh_quota(verify: None = Depends(check_gateway_token)):
     """手动刷新全部账号余额(quota/usage)。"""
     res = refresh_all_quotas()
     add_log(f"Quota refresh: ok={res['ok']} failed={res['failed']} total={res['total']}")
+    return {"status": "ok", **res}
+
+
+@app.post("/ui/accounts/keepalive")
+async def ui_keepalive(verify: None = Depends(check_gateway_token)):
+    """手动触发一轮账号保活(探活 + 失效即刷新)。"""
+    res = keepalive_once()
+    add_log(f"Keepalive: ok={res['ok']} failed={res['failed']} total={res['total']}")
     return {"status": "ok", **res}
 
 
@@ -612,7 +643,7 @@ async def chat_completions(payload: dict[str, Any], authorization: str | None = 
 def main() -> None:
     import uvicorn
 
-    start_refresh_loop()  # 启动 token 定时刷新线程（每 6 小时）
+    _start_background_loops()  # token 刷新(6h)/余额刷新(09:00,21:00)/每日保活(10:00)
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default=os.getenv("QODER_HOST", "127.0.0.1"))

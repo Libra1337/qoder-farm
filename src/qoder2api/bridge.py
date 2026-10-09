@@ -12,6 +12,7 @@ from . import encoding
 from .auth import SessionContext, bearer_headers
 from .env import httpx_client_kwargs
 from .fingerprint import derive_id
+from .reqlog import parse_usage_frame
 
 
 QODER_CHAT_URL = "https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
@@ -442,6 +443,7 @@ async def stream_openai_response(req: dict[str, Any], sess: SessionContext) -> A
     pending = ""
     streaming_text = False
     pending_role = "assistant"
+    usage: dict[str, int] = {}
 
     def event(payload: dict[str, Any]) -> str:
         return f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
@@ -449,6 +451,9 @@ async def stream_openai_response(req: dict[str, Any], sess: SessionContext) -> A
     async for line in qoder_stream_lines(sess, body, model):
         if not line.startswith("data:"):
             continue
+        u = parse_usage_frame(line)  # 上游统计(可能藏在 raw_usage 里),累积后随末帧转发
+        if u:
+            usage = u
         delta = extract_delta(line[5:].strip())
         if delta.is_empty:
             continue
@@ -504,6 +509,14 @@ async def stream_openai_response(req: dict[str, Any], sess: SessionContext) -> A
 
     finish_reason = "tool_calls" if tool_calls.calls else "stop"
     yield event(make_chunk(chunk_id, created, model, {}, finish_reason))
+    if usage:  # 标准 include_usage 语义:末帧带 usage(choices 为空),供客户端与本地日志统计
+        in_tok, out_tok = usage.get("in_tokens", 0), usage.get("out_tokens", 0)
+        yield event({
+            "id": chunk_id, "object": "chat.completion.chunk", "created": created, "model": model,
+            "choices": [],
+            "usage": {"prompt_tokens": in_tok, "completion_tokens": out_tok,
+                      "total_tokens": in_tok + out_tok, "credits": usage.get("credits", 0.0)},
+        })
     yield "data: [DONE]\n\n"
 
 
@@ -513,6 +526,7 @@ async def complete_openai_response(req: dict[str, Any], sess: SessionContext) ->
     created = int(time.time())
     full = []
     tool_calls = ToolCallAccumulator()
+    usage: dict[str, int] = {}
     async for line in qoder_stream_lines(sess, body, model):
         if not line.startswith("data:"):
             continue
@@ -521,6 +535,9 @@ async def complete_openai_response(req: dict[str, Any], sess: SessionContext) ->
             full.append(delta.content)
         if delta.tool_calls:
             tool_calls.append(delta.tool_calls)
+        u = parse_usage_frame(line)
+        if u:
+            usage = u
     content = "".join(full)
     fallback_tool_calls = None if tool_calls.calls or not tools_enabled else parse_tool_calls_text(content)
     message: dict[str, Any] = {"role": "assistant"}
@@ -533,11 +550,12 @@ async def complete_openai_response(req: dict[str, Any], sess: SessionContext) ->
         message["content"] = content
     if tool_calls.calls:
         message["tool_calls"] = tool_calls.snapshot()
+    in_tok, out_tok = usage.get("in_tokens", 0), usage.get("out_tokens", 0)
     return {
         "id": completion_id,
         "object": "chat.completion",
         "created": created,
         "model": model,
         "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls" if tool_calls.calls or fallback_tool_calls else "stop"}],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "usage": {"prompt_tokens": in_tok, "completion_tokens": out_tok, "total_tokens": in_tok + out_tok},
     }

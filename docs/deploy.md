@@ -4,10 +4,12 @@
 
 ## 1. 基础
 ```bash
-apt-get update && apt-get install -y xvfb wget
+apt-get update && apt-get install -y wget
 curl -LsSf https://astral.sh/uv/install.sh | sh
 wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb
 apt-get install -y /tmp/chrome.deb
+# 浏览器自动化用 Playwright 驱动系统 Chrome(channel=chrome),无需 Xvfb:
+# Playwright 自带 headless,Chrome 154+ 的 headless 下 DrissionPage 会 CDP 握手 404,故已弃用
 ```
 
 ## 2. 代码与依赖
@@ -28,11 +30,11 @@ SHIRO_DOMAIN_ID=2
 SLIDER_MANUAL=0
 ```
 
-## 4. systemd(xvfb + 网关)
-`xvfb.service`:`ExecStart=/usr/bin/Xvfb :99 -screen 0 1280x800x24`
-`qoder2api.service`:`Environment=DISPLAY=:99` + `ExecStart=/opt/qoder2api/.venv/bin/python -c 'from qoder2api.app import main; main()'`
+## 4. systemd(仅网关)
+`qoder2api.service`:`ExecStart=/opt/qoder2api/.venv/bin/python -c 'from qoder2api.app import main; main()'`
 
-> 注意:Chrome 以 root 跑必须 `--no-sandbox`(代码已内置);Chrome 155 的 `--headless=new` 与 DrissionPage 断连,Xvfb 方案已验证可用。
+> 注意:Chrome 以 root 跑必须 `--no-sandbox`(浏览器适配层在 Linux 下已内置);注册机默认 headless
+> (`SLIDER_MANUAL=0`),无需 Xvfb/DISPLAY。本地人工过验证时设 `REG_HEADFUL=1` 走有头模式。
 
 ## 5. Caddy
 ```

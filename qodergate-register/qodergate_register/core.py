@@ -416,7 +416,7 @@ def _free_port() -> int:
 
 
 # ---------------------------------------------------------------------------
-# DrissionPage 注册机（每任务一个实例）
+# Playwright 注册机（每任务一个实例；浏览器适配层见 qodergate_register/browser.py）
 # ---------------------------------------------------------------------------
 
 # 常见桌面 Chrome UA 池（指纹多样化用）
@@ -431,7 +431,10 @@ _CHROME_UAS = (
 class RegistrarBot:
     def __init__(self, task_id: str = "t1", verifier_queue: VerifierQueue | None = None,
                  profile_dir: str | None = None, cleanup_profile: bool = False) -> None:
-        from DrissionPage import ChromiumOptions, ChromiumPage
+        try:
+            from .browser import ChromiumOptions, ChromiumPage
+        except ImportError:
+            from browser import ChromiumOptions, ChromiumPage
 
         self.task_id = task_id
         self.vq = verifier_queue or _VQ
@@ -439,12 +442,8 @@ class RegistrarBot:
         co.set_local_port(_free_port())  # 独立调试端口，杜绝实例串扰
         args = ["--no-first-run", "--disable-gpu", "--disable-background-networking",
                 "--disable-default-apps", "--disable-extensions", "--disable-sync"]
-        if sys.platform == "linux":
-            # root 运行必须 no-sandbox;小 /dev/shm 兜底;无显示时再叠 headless
-            # (注:Chrome 155 + DrissionPage 的 headless=new 有断连 bug,服务器用 Xvfb 更稳)
-            args += ["--no-sandbox", "--disable-dev-shm-usage", "--window-size=1280,800"]
-            if not os.environ.get("DISPLAY"):
-                args += ["--headless=new"]
+        # 浏览器适配层自行处理 headless(默认按 SLIDER_MANUAL 判定)与 Linux no-sandbox,
+        # 无需 Xvfb:Playwright 官方 headless 直接可用(Chrome 154+ 下 DrissionPage 会握手 404)
         for arg in args:
             try:
                 co.set_argument(arg)
@@ -564,7 +563,10 @@ class RegistrarBot:
         if btn is not None:
             btn.click()
             return
-        self.page.ele('css:button[type="submit"]').click()
+        fallback = self.page.ele('css:button[type="submit"]', timeout=10)
+        if fallback is None:
+            raise RuntimeError("找不到提交按钮(css:button[type=submit])")
+        fallback.click()
 
     # ---- 填表（身份断言 + 清空 + 输入后值验证，防串扰） ----
     def _fill(self, selector: str, value: str, must_id: str | None = None,
@@ -572,6 +574,8 @@ class RegistrarBot:
         page = self.page
         for attempt in range(retries):
             el = page.ele(selector, timeout=10)
+            if el is None:
+                raise RuntimeError(f"找不到填表输入框: {selector}")
             el_id = el.attr("id") or ""
             if must_id and el_id != must_id:
                 raise RuntimeError(f"填表定位错误: 期望 #{must_id}，实际 #{el_id} ({selector})")

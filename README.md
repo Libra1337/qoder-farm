@@ -72,10 +72,10 @@ uv run python -m qodergate_register --parents 2
                           ├─ 粘性选号(LRU) → 每账号并发闸 → api2-v2.qoder.sh(纯 Bearer)
                           ├─ 失败分类:401/403 轮转 · 429 冷却 60s · quota 二次确认
                           ├─ reqlog(SQLite + 内存环)→ /ui/requests 面板
-                          └─ 内置注册机(Xvfb + Chrome)→ 滑块破解 → device flow → 入库
+                          └─ 内置注册机(Playwright + headless Chrome)→ 滑块破解 → device flow → 入库
 ```
 
-生产部署参考(Debian 12 + Caddy + systemd + Xvfb):见 [docs/deploy.md](docs/deploy.md)。
+生产部署参考(Debian 12 + Caddy + systemd;浏览器用 Playwright 自带 headless,无需 Xvfb):见 [docs/deploy.md](docs/deploy.md)。
 
 ## ✅ 已完成
 
@@ -86,7 +86,9 @@ uv run python -m qodergate_register --parents 2
 - [x] 粘性路由 / 并发闸 / 冷却 / 首 token 预算(Reso2api 纪律移植)
 - [x] 多模态:裸 base64 魔数补前缀、assistant 图片挪 user 轮
 - [x] 面板:余额列 + Requests 调用日志 + 用量统计 + /v1/models
-- [x] 服务器部署(Debian 12 + Xvfb + Chrome 155 + systemd + Caddy 自动 TLS)+ 压测 20/20
+- [x] 服务器部署(Debian 12 + Caddy + systemd)+ 压测 20/20;浏览器改用 Playwright headless(弃 DrissionPage/Xvfb)
+- [x] 调用日志 tokens 补全:从上游 `raw_usage`(含嵌套/JSON 串/input·output_tokens 变体)解析,流式末帧转发标准 usage
+- [x] 面板按日用量曲线图 + 每日保活(10:00 探活 + 失效即刷新);后台线程改由 startup 事件启动(uvicorn 直跑也生效)
 
 ## 📌 TODO
 
@@ -98,9 +100,6 @@ uv run python -m qodergate_register --parents 2
   `tools/slider_fit.py` 已就绪。**待办**:在真实注册流量上积累 `slider_attempts.jsonl`(已修落盘
   路径 + 补 `ncc_x/zncc_x/agree` 字段),用拟合工具复核门阈值/权重,并据真实数据确认是否需要
   把默认关闭的严格一致性门(`SLIDER_AGREE_TOL`)打开
-- [ ] Chrome 155 headless=new 与 DrissionPage 断连 bug 绕过(现用 Xvfb 替代)
-- [ ] 面板增加按日用量曲线图、账号签到式保活(每日一次 token exercise)
-- [ ] 调用日志 tokens 统计补全(lite 档上游不回 usage 帧,需从 raw_usage 解析)
 
 ## ⚠️ 免责声明
 

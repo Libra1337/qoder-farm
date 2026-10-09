@@ -144,7 +144,7 @@ def solve_distance(bg_bytes: bytes, piece_bytes: bytes) -> dict[str, Any] | None
 
 
 # ---------------------------------------------------------------------------
-# DrissionPage 页面操作
+# 页面操作(浏览器适配层,见 browser.py)
 # ---------------------------------------------------------------------------
 def _captcha_imgs(page) -> list[dict]:
     """取验证码两张图(按宽度降序:底图在前,拼图条在后),兼容 data: 与 https 源。"""

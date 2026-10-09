@@ -215,3 +215,67 @@ def start_quota_refresh_loop() -> None:
         refresh_all_quotas()
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# 每日保活(Qoder 无签到端点):逐个账号探活 + 失效即刷新,对应 README 的"签到式保活"
+# ---------------------------------------------------------------------------
+KEEPALIVE_SLOT = 10 * 60  # 每天 10:00 本地时间
+
+
+def keepalive_account(uid: str) -> dict[str, Any]:
+    """单账号保活:GET /api/v1/userinfo 探活;失败则用 refresh_token 刷新后重探。"""
+    with get_db() as conn:
+        row = conn.execute("SELECT name, security_oauth_token FROM accounts WHERE uid = ?", (uid,)).fetchone()
+    if not row:
+        return {"ok": False, "uid": uid, "error": "账号不存在"}
+    tok = (row["security_oauth_token"] or "").strip()
+    try:
+        r = httpx.get(f"{OPENAPI}/api/v1/userinfo",
+                      headers={"Authorization": f"Bearer {tok}", "Accept": "application/json"}, timeout=20)
+    except httpx.HTTPError as e:
+        return {"ok": False, "uid": uid, "error": f"网络错误: {e}"}
+    if r.status_code == 200:
+        with get_db() as conn:
+            conn.execute("UPDATE accounts SET last_status='ok', last_error=NULL WHERE uid = ?", (uid,))
+        return {"ok": True, "uid": uid, "name": row["name"], "action": "probe"}
+    # 探活失败:尝试刷新 token(可能是 dt- 过期)
+    refreshed = refresh_one_account(uid)
+    if refreshed.get("ok"):
+        return {"ok": True, "uid": uid, "name": row["name"], "action": "refresh",
+                "probe_status": r.status_code}
+    with get_db() as conn:
+        conn.execute("UPDATE accounts SET last_status='dead', last_error=? WHERE uid = ?",
+                     (f"keepalive HTTP {r.status_code}", uid))
+    return {"ok": False, "uid": uid, "name": row["name"], "error": f"探活 HTTP {r.status_code} 且刷新失败"}
+
+
+def keepalive_once() -> dict[str, Any]:
+    """对所有 enabled 账号跑一轮保活。"""
+    with get_db() as conn:
+        uids = [r[0] for r in conn.execute("SELECT uid FROM accounts WHERE enabled = 1").fetchall()]
+    results = [keepalive_account(u) for u in uids]
+    ok = sum(1 for x in results if x.get("ok"))
+    return {"ok": ok, "failed": len(results) - ok, "total": len(results), "results": results}
+
+
+def _keepalive_loop() -> None:
+    """每天 KEEPALIVE_SLOT 跑一轮保活(精确分钟槽位,不轮询空转)。"""
+    import datetime as _dt
+    last_slot = None
+    while True:
+        now = _dt.datetime.now()
+        cur = now.hour * 60 + now.minute
+        cur_slot = (now.strftime("%Y%m%d"), KEEPALIVE_SLOT) if cur >= KEEPALIVE_SLOT else None
+        if cur_slot is not None and cur_slot != last_slot:
+            last_slot = cur_slot
+            try:
+                res = keepalive_once()
+                print(f"[keepalive] ok={res['ok']} failed={res['failed']}", flush=True)
+            except Exception as e:
+                print(f"[keepalive] error: {e}", flush=True)
+        time.sleep(30)
+
+
+def start_keepalive_loop() -> None:
+    threading.Thread(target=_keepalive_loop, daemon=True).start()

@@ -12,6 +12,10 @@ cd qodergate-register
 uv sync          # 或 pip install -e .
 ```
 
+浏览器:用 Playwright 驱动系统 Chrome(`REG_BROWSER_CHANNEL=chrome`,默认),无需 Xvfb。
+默认 headless(`SLIDER_MANUAL=0`);本地要人工滑滑块时设 `SLIDER_MANUAL=1` 或 `REG_HEADFUL=1` 走有头。
+若首次运行提示缺浏览器,可 `playwright install chromium`(或直接装 Chrome 用 channel=chrome)。
+
 ## 配置
 
 默认邮箱提供方为 **ShiroMail**（自建邮局 mail.futile.page）：
@@ -69,7 +73,7 @@ uv run python -m qodergate_register --parents 1 --output ./out.json
 - **滑块自动破解（默认开启，`SLIDER_AUTO=0` 关闭）**：阿里 PUZZLE 滑块通过图像匹配自动通过
   （掩码边缘 NCC + 掩码 RGB ZNCC 双信号融合,合成样本台单次命中 75~96%、接受集误差中位 0.0px);
   每次失败自动刷新换图并做小幅偏移扫描重试(最多 14 次),仍失败才转人工置顶。单账号全程
-  1.5~4 分钟。依赖 `numpy` + `Pillow`(已加入 pyproject)。
+  1.5~4 分钟。依赖 `numpy` + `Pillow`(滑块)+ `playwright`(浏览器,已加入 pyproject)。
 - 可选严格一致性门 `SLIDER_AGREE_TOL`(默认关):开启后两信号不一致即换图重试,接受集精度 100%,
   但单次命中降到 47~81%(被拒的尝试同样要重刷,净耗时更长)。风控优先时再开。
 - ddddocr 不适用本滑块(拼图是 52×200 竖条,slide_match 置信度 0.08、裁剪后仍偏 16px;
