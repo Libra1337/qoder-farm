@@ -58,7 +58,12 @@ def find_umid_binary() -> str | None:
 
 
 def native_identity(uid: str) -> dict[str, Any] | None:
-    """跑官方组件取真机器身份(machineToken/Type/Code);失败返回 None(不可用派生假身份——会被过滤)。"""
+    """取真机器身份:优先环境变量注入(物理机产出、任何地方可用),否则本机跑官方组件。"""
+    env_tok = os.getenv("QODER_UMID_TOKEN", "").strip()
+    if env_tok:
+        return {"machineToken": env_tok,
+                "machineType": os.getenv("QODER_UMID_TYPE", ""),
+                "machineCode": os.getenv("QODER_UMID_CODE", "")}
     binary = find_umid_binary()
     if not binary:
         return None
@@ -91,8 +96,8 @@ def desktop_headers(token: str, uid: str, ident: dict[str, Any]) -> dict[str, st
         "cosy-machinetoken": ident["machineToken"],
         "cosy-machinetype": ident.get("machineType", ""),
         "cosy-machinecode": ident.get("machineCode", ""),
-        "cosy-machineos": "darwin_arm64",
-        "cosy-machinehostname": "MacBook-Pro.local",
+        "cosy-machineos": os.getenv("QODER_UMID_OS", "darwin_arm64"),
+        "cosy-machinehostname": os.getenv("QODER_UMID_HOSTNAME", "MacBook-Pro.local"),
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
@@ -164,3 +169,42 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# ---------------------------------------------------------------------------
+# 每日定时领取(默认 09:05;领取目标 = QODER_CLAIM_TARGET 邮箱前缀,默认池中第一个账号)
+# ---------------------------------------------------------------------------
+CLAIM_SLOT_MIN = int(os.getenv("QODER_CLAIM_SLOT", str(9 * 60 + 5)))
+
+
+def _claim_loop() -> None:
+    import datetime as _dt
+    import time as _time
+    last = None
+    while True:
+        now = _dt.datetime.now()
+        cur = now.hour * 60 + now.minute
+        slot = (now.strftime("%Y%m%d"), CLAIM_SLOT_MIN if CLAIM_SLOT_MIN <= cur else None)
+        if slot[1] is not None and slot != last:
+            last = slot
+            try:
+                from .database import get_db
+                target = os.getenv("QODER_CLAIM_TARGET", "").strip()
+                with get_db() as conn:
+                    if target:
+                        row = conn.execute("SELECT uid, name, security_oauth_token FROM accounts WHERE enabled=1 AND name LIKE ? ORDER BY rowid LIMIT 1", (target + "%",)).fetchone()
+                    else:
+                        row = conn.execute("SELECT uid, name, security_oauth_token FROM accounts WHERE enabled=1 ORDER BY rowid LIMIT 1").fetchone()
+                if row:
+                    res = claim_daily(row["security_oauth_token"], row["uid"])
+                    print(f"[daily-claim] {row['name']}: {res}", flush=True)
+            except Exception as e:
+                print(f"[daily-claim] error: {e}", flush=True)
+        _time.sleep(30)
+
+
+def start_claim_loop() -> None:
+    if os.getenv("QODER_CLAIM_DISABLED", "") == "1":
+        return
+    import threading
+    threading.Thread(target=_claim_loop, daemon=True).start()

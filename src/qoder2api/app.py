@@ -31,6 +31,7 @@ from .registrar import get_registrar_status, start_registration, stop_registrati
 from .accounts import get_session_for_uid
 from .bridge import conversation_fingerprint
 from .fingerprint import redact
+from .campaigns import claim_daily, claim_all, start_claim_loop
 from .reqlog import init_reqlog_db, record_req, parse_usage_frame, query_req_logs, usage_stats
 from .tokens import (
     update_account_quota,
@@ -74,6 +75,7 @@ def _start_background_loops() -> None:
     start_refresh_loop()
     start_quota_refresh_loop()
     start_keepalive_loop()
+    start_claim_loop()  # 每日 100C 领取(需 QODER_UMID_* 身份或本机 umid 组件)
 
 
 @app.on_event("startup")
@@ -346,6 +348,23 @@ async def ui_keepalive(verify: None = Depends(check_gateway_token)):
     res = keepalive_once()
     add_log(f"Keepalive: ok={res['ok']} failed={res['failed']} total={res['total']}")
     return {"status": "ok", **res}
+
+
+@app.post("/ui/accounts/claim-daily")
+async def ui_claim_daily(verify: None = Depends(check_gateway_token), target: str | None = None):
+    """手动触发每日 100C 领取(target=邮箱前缀;不填=池中第一个号;all=逐号试)。"""
+    from .database import get_db
+    if target == "all":
+        res = claim_all()
+    else:
+        with get_db() as conn:
+            if target:
+                row = conn.execute("SELECT uid, name, security_oauth_token FROM accounts WHERE enabled=1 AND name LIKE ? LIMIT 1", (target + "%",)).fetchone()
+            else:
+                row = conn.execute("SELECT uid, name, security_oauth_token FROM accounts WHERE enabled=1 LIMIT 1").fetchone()
+        res = claim_daily(row["security_oauth_token"], row["uid"]) if row else {"ok": False, "message": "无账号"}
+    add_log(f"Claim: {json.dumps(res, ensure_ascii=False)[:120]}")
+    return {"status": "ok", "result": res}
 
 
 @app.get("/ui/logs")
