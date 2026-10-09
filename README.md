@@ -26,11 +26,14 @@ Qoder 账号池网关 + 全自动注册机:把批量注册的 Qoder 免费账号
 - 失败自动刷新换图 + 小幅偏移扫描重试(≤14 次),实测单账号 1.5~4 分钟
 - 纯算法依赖(numpy + Pillow),不调外部 API
 
-## 📊 额度真相(2026-10 实测)
+## 📊 额度真相(2026-10-10 更新:重大突破)
 
-- 免费号 = **`lite` 档无限用**(0 credits 照样 200);`auto/ultimate/performance/efficient` 档需 credits(402)
-- 300 Credits = 一次性 **14 天 Pro 试用**,绑定"真实机器上最新版客户端首次登录",虚拟机不可领;**官方明示多开试用号会被封**
-- Qoder **无签到端点**(本网关用定时余额刷新替代签到槽位)
+- **「每天领 100 Credits」活动可直接 API 领取!**(2026-10-10 实测打通,详见 `src/qoder2api/campaigns.py`)
+  - 两道门:桌面端请求头(`User-Agent: Qoder` + `cosy-clienttype: 10` + `cosy-version: 0.4.3`)+ **官方 umid 组件产出的原生机器身份**(本机 `~/.qoder/.bin/runtime-info-*`,isVm 必须 false)
+  - `POST /sash/api/v1/me/campaigns/{id}/claim`,幂等;领取后 **gpt-5 / ultimate(Claude 系)立即可用**(100C/天,系数 ultimate=2.0)
+  - **按"人"去重**:同一机器身份每天只能给一个账号领(二号活动直接隐藏);Windows/Linux 可清 `~/.config/.locale_cfg` 种子换身份轮领,**macOS 种子位置未破解**
+- 免费号常态 = **`lite` 档无限**;credits 到账后档位解锁(gpt-5 ✅、ultimate ✅ 实测)
+- 300C 首登 Pro 试用:批量号四路实验全部未发放(旧App/QoderWork/IDE/处女号IDE首登),已死心
 - 部署实测:3 并发注册单账号 1.5~4 分钟;网关压测 20/20@5 并发零失败
 
 ## 🚀 快速开始
@@ -94,7 +97,9 @@ uv run python -m qodergate_register --parents 2
 
 - [ ] **注册走代理池**:机房 IP 被阿里滑块零容差(几何/轨迹全部正常仍 14 连拒),接住宅代理后服务器即可全自动量产
 - [ ] **300C Pro 试用发放路径(实验过半,结论偏悲观)**:2026-10-08 实测——真实 Mac 上用真实客户端(0.4.3,device flow 完整走通)登录批量注册号,套餐仍 `PLAN_TIER_FREE`、0 credits,**未发放**;剩余假设:绑定 Qoder IDE(另一产品)首次启动 / 需完整 onboarding 建项目 / 服务端按风控延迟发放;官方 FAQ 明示试用绑定"最新版客户端首次登录+非虚拟机"且"多开试用号会封",继续深挖性价比存疑
-- [ ] premium 模型组(ultimate/performance/efficient)可用性:依赖账号有 credits(试用/付费),网关侧模型路由已就绪
+- [x] premium 模型组解锁:**每日 100C 领取已打通**(campaigns.py),credits 到账即用
+- [ ] macOS 机器身份轮换(umid 种子在 Keychain?破解后=每号每天 100C)
+- [ ] 网关集成:每日定时 claim(挑一号领)+ credits 感知路由(有 credits 的号优先跑 premium 档)
 - [ ] 滑块求解器精度(本轮已推进):融合规则由「|NCC−凹陷|>25 改信凹陷」(实测 57~67%)换成
   「边缘 NCC + RGB ZNCC 归一化相加」,合成台单次 75~96%、接受集误差中位 0.0px;离线拟合工具
   `tools/slider_fit.py` 已就绪。**待办**:在真实注册流量上积累 `slider_attempts.jsonl`(已修落盘
