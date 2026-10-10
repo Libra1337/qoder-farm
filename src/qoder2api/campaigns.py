@@ -225,17 +225,30 @@ def _claim_loop() -> None:
         slot = (now.strftime("%Y%m%d"), CLAIM_SLOT_MIN if CLAIM_SLOT_MIN <= cur else None)
         if slot[1] is not None and slot != last:
             last = slot
+            target = os.getenv("QODER_CLAIM_TARGET", "").strip()
             try:
-                from .database import get_db
-                target = os.getenv("QODER_CLAIM_TARGET", "").strip()
-                with get_db() as conn:
-                    if target:
-                        row = conn.execute("SELECT uid, name, security_oauth_token FROM accounts WHERE enabled=1 AND name LIKE ? ORDER BY rowid LIMIT 1", (target + "%",)).fetchone()
-                    else:
-                        row = conn.execute("SELECT uid, name, security_oauth_token FROM accounts WHERE enabled=1 ORDER BY rowid LIMIT 1").fetchone()
-                if row:
-                    res = claim_daily(row["security_oauth_token"], row["uid"])
-                    print(f"[daily-claim] {row['name']}: {res}", flush=True)
+                if target:
+                    from .database import get_db
+                    with get_db() as conn:
+                        row = conn.execute("SELECT uid, name, security_oauth_token FROM accounts WHERE enabled=1 AND name LIKE ? LIMIT 1", (target + "%",)).fetchone()
+                    res = claim_daily(row["security_oauth_token"], row["uid"]) if row else {}
+                    print(f"[daily-claim] {row['name'] if row else '?'}: {res}", flush=True)
+                else:
+                    # 全池逐号领取(每号每窗口一次;身份池按号派生保证活动可见)
+                    from .database import get_db
+                    with get_db() as conn:
+                        rows = conn.execute("SELECT uid, name, security_oauth_token FROM accounts WHERE enabled=1").fetchall()
+                    ok = fail = 0
+                    for r in rows:
+                        try:
+                            res = claim_daily(r["security_oauth_token"], r["uid"])
+                            ok += bool(res.get("ok"))
+                            fail += not res.get("ok")
+                            print(f"[daily-claim] {r['name']}: {res.get('status')} {res.get('amount') or ''}", flush=True)
+                        except Exception as e:
+                            fail += 1
+                            print(f"[daily-claim] {r['name']}: ERR {e}", flush=True)
+                    print(f"[daily-claim] batch ok={ok} fail={fail}", flush=True)
             except Exception as e:
                 print(f"[daily-claim] error: {e}", flush=True)
         _time.sleep(30)
