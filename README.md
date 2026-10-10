@@ -99,7 +99,7 @@ uv run python -m qodergate_register --parents 2
 - [ ] **300C Pro 试用发放路径(实验过半,结论偏悲观)**:2026-10-08 实测——真实 Mac 上用真实客户端(0.4.3,device flow 完整走通)登录批量注册号,套餐仍 `PLAN_TIER_FREE`、0 credits,**未发放**;剩余假设:绑定 Qoder IDE(另一产品)首次启动 / 需完整 onboarding 建项目 / 服务端按风控延迟发放;官方 FAQ 明示试用绑定"最新版客户端首次登录+非虚拟机"且"多开试用号会封",继续深挖性价比存疑
 - [x] premium 模型组解锁:**每日 100C 领取已打通**(campaigns.py),credits 到账即用
 - [ ] macOS 机器身份轮换(umid 种子在 Keychain?破解后=每号每天 100C)
-- [ ] 网关集成:每日定时 claim(挑一号领)+ credits 感知路由(有 credits 的号优先跑 premium 档)
+- [x] 网关集成:每日 09:05 定时 claim + `/ui/accounts/claim-daily` + **credits 感知路由**(premium 模型自动路由到 quota_exceeded=0 的号,credits 耗尽自动标记换号;`QODER_PREMIUM_MODELS` 可覆盖档位集合)
 - [ ] 滑块求解器精度(本轮已推进):融合规则由「|NCC−凹陷|>25 改信凹陷」(实测 57~67%)换成
   「边缘 NCC + RGB ZNCC 归一化相加」,合成台单次 75~96%、接受集误差中位 0.0px;离线拟合工具
   `tools/slider_fit.py` 已就绪。**待办**:在真实注册流量上积累 `slider_attempts.jsonl`(已修落盘

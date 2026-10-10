@@ -499,9 +499,46 @@ def _sticky_drop(conv: str) -> None:
     _sticky.pop(conv, None)
 
 
+def _premium_uids() -> list[str]:
+    """有 credits 的账号(quota 刷新后 quota_exceeded=0;领取 100C 后翻 0)。"""
+    try:
+        data = db_load_accounts()
+        return [a["uid"] for a in data["accounts"]
+                if a.get("enabled", True) and not a.get("quota_exceeded", 1)]
+    except Exception:
+        return []
+
+
+def _is_premium_model(model: str) -> bool:
+    """lite 免费;其余(gpt-5/ultimate/auto/performance/efficient...)都要 credits。"""
+    premium = {m.strip() for m in os.getenv("QODER_PREMIUM_MODELS", "").split(",") if m.strip()}
+    if premium:
+        return model in premium
+    return model != "lite"
+
+
 async def pick_session(payload: dict[str, Any]) -> tuple[SessionContext, str]:
-    """粘性优先(同会话同账号 → 上游前缀缓存命中),冷却/失效则回退轮转。"""
+    """粘性优先(同会话同账号 → 上游前缀缓存命中),冷却/失效则回退轮转。
+    premium 模型(非 lite)强制路由到有 credits 的账号(每日 100C 领取后 quota_exceeded=0)。"""
     conv = conversation_fingerprint(payload)
+    # premium 定向:粘性命中且该号有 credits → 直用;否则挑一个有 credits 的号
+    if _is_premium_model(str(payload.get("model") or "lite")):
+        uid = _sticky_get(conv)
+        premium = _premium_uids()
+        if uid and uid in premium and not _cooling(uid):
+            try:
+                return get_session_for_uid(uid), conv
+            except Exception:
+                _sticky_drop(conv)
+        for cand in premium:
+            if not _cooling(cand):
+                try:
+                    sess_p = get_session_for_uid(cand)
+                    _sticky_put(conv, cand)
+                    return sess_p, conv
+                except Exception:
+                    continue
+        # 无 credits 号可用 → 走常规轮转(上游会 402,由既有错误路径兜底提示)
     uid = _sticky_get(conv)
     if uid and not _cooling(uid):
         try:
@@ -647,6 +684,9 @@ async def chat_completions(payload: dict[str, Any], authorization: str | None = 
                     _sticky_drop(conv)
                 if is_quota_error(exc):
                     _cooldown(current_uid, 60.0)
+                    # premium credits 耗尽:快速刷新该号超额位,避免后续继续命中
+                    with get_db() as _conn:
+                        _conn.execute("UPDATE accounts SET quota_exceeded = 1 WHERE uid = ?", (current_uid,))
                 try:
                     rotate_next_account(current_uid, str(exc))
                 except Exception as e:
