@@ -12,13 +12,13 @@ interface Account {
   refresh_token: string; machine_id: string; enabled: boolean; last_status: string
   last_error: string | null; quota: number; is_quota_exceeded: boolean
   plan: string | null; user_tag: string | null; next_reset_at: number | null
-  quota_total?: number; quota_used?: number; quota_remaining?: number; quota_exceeded?: number; quota_updated_at?: string | null; user_type2?: string | null; claimed_credits?: number
+  quota_total?: number; quota_used?: number; quota_remaining?: number; quota_exceeded?: number; quota_updated_at?: string | null; user_type2?: string | null; claimed_credits?: number; used_credits?: number
 }
 interface AccountsConfig { accounts: Account[]; active_uid: string | null }
 interface UIStatus { ready: boolean; mode: string; username: string | null; uid: string | null; user_type: string | null; error: string | null; accounts_count: number }
 interface APIConfig { auth_required: boolean; allowed_keys: string[] }
 interface Message { role: 'user' | 'assistant'; content: string }
-type TabId = 'dashboard' | 'accounts' | 'requests' | 'playground' | 'api-keys' | 'logs' | 'register'
+type TabId = 'dashboard' | 'accounts' | 'models' | 'requests' | 'playground' | 'api-keys' | 'logs' | 'register'
 type AppTabId = TabId
 type Lang = 'en' | 'zh'
 type ToastType = 'SUCCESS' | 'ERROR' | 'INFO'
@@ -46,6 +46,7 @@ const NAV_ITEMS: { id: AppTabId; icon: string; label: string }[] = [
   { id: 'dashboard', icon: 'dashboard', label: 'Dashboard' },
   { id: 'accounts', icon: 'account_balance_wallet', label: 'Account Pool' },
   { id: 'requests', icon: 'receipt_long', label: 'Requests' },
+  { id: 'models', icon: 'category', label: 'Models' },
   { id: 'playground', icon: 'smart_toy', label: 'AI Playground' },
   { id: 'api-keys', icon: 'vpn_key', label: 'API Key Management' },
   { id: 'register', icon: 'person_add', label: 'Auto Registrar' },
@@ -55,13 +56,13 @@ const NAV_ITEMS: { id: AppTabId; icon: string; label: string }[] = [
 const UI_TEXT = {
   en: {
     nav: {
-      dashboard: 'Dashboard', accounts: 'Account Pool', requests: 'Requests', playground: 'AI Playground', apiKeys: 'API Key Management', logs: 'Logs', register: 'Auto Registrar',
+      dashboard: 'Dashboard', accounts: 'Account Pool', requests: 'Requests', models: 'Models', playground: 'AI Playground', apiKeys: 'API Key Management', logs: 'Logs', register: 'Auto Registrar',
     },
     breadcrumb: {
-      dashboard: 'Control Panel / Overview', accounts: 'Console / Management', requests: 'Control Panel / Requests', playground: 'Playground / Experiment', apiKeys: 'Administration / Security', logs: 'System / Observability', docs: 'Developer Platform / Wiki', register: 'Automation / Registrar',
+      dashboard: 'Control Panel / Overview', accounts: 'Console / Management', requests: 'Control Panel / Requests', models: 'Console / Models', playground: 'Playground / Experiment', apiKeys: 'Administration / Security', logs: 'System / Observability', docs: 'Developer Platform / Wiki', register: 'Automation / Registrar',
     },
     title: {
-      dashboard: 'System Overview', accounts: 'Account Pool', requests: 'Request Logs', playground: 'AI Playground', apiKeys: 'API Management', logs: 'Service Logs', docs: 'Documentation', register: 'Auto Registrar',
+      dashboard: 'System Overview', accounts: 'Account Pool', requests: 'Request Logs', models: 'Model Catalog', playground: 'AI Playground', apiKeys: 'API Management', logs: 'Service Logs', docs: 'Documentation', register: 'Auto Registrar',
     },
     common: { docs: 'Docs', support: 'Support', healthy: 'Healthy', offline: 'Offline', signOut: 'Sign Out', refresh: 'Refresh', add: 'Add', delete: 'Delete', copy: 'Copy' },
     dashboard: {
@@ -103,13 +104,13 @@ const UI_TEXT = {
   },
   zh: {
     nav: {
-      dashboard: '控制台', accounts: '账号池', requests: '调用日志', playground: '调试对话', apiKeys: 'API Key 管理', logs: '服务日志', register: '自动注册机',
+      dashboard: '控制台', accounts: '账号池', requests: '调用日志', models: '模型清单', playground: '调试对话', apiKeys: 'API Key 管理', logs: '服务日志', register: '自动注册机',
     },
     breadcrumb: {
-      dashboard: '控制台 / 概览', accounts: '控制台 / 账号管理', requests: '控制台 / 调用日志', playground: '调试 / 对话测试', apiKeys: '管理 / 安全', logs: '系统 / 日志', docs: '开发者平台 / 文档', register: '自动化 / 注册机',
+      dashboard: '控制台 / 概览', accounts: '控制台 / 账号管理', requests: '控制台 / 调用日志', models: '控制台 / 模型清单', playground: '调试 / 对话测试', apiKeys: '管理 / 安全', logs: '系统 / 日志', docs: '开发者平台 / 文档', register: '自动化 / 注册机',
     },
     title: {
-      dashboard: '系统概览', accounts: '账号池', requests: '调用日志', playground: '调试对话', apiKeys: 'API 管理', logs: '服务日志', docs: '文档', register: '自动注册机',
+      dashboard: '系统概览', accounts: '账号池', requests: '调用日志', models: '模型清单', playground: '调试对话', apiKeys: 'API 管理', logs: '服务日志', docs: '文档', register: '自动注册机',
     },
     common: { docs: '文档', support: '支持', healthy: '正常', offline: '未就绪', signOut: '退出', refresh: '刷新', add: '添加', delete: '删除', copy: '复制' },
     dashboard: {
@@ -398,6 +399,10 @@ export default function App() {
   const [showBatchImport, setShowBatchImport] = useState(false)
   const [batchJson, setBatchJson] = useState('')
   const [refreshingTokens, setRefreshingTokens] = useState(false)
+  const [modelsList, setModelsList] = useState<any[] | null>(null)
+  const loadModels = async () => {
+    try { const r = await fetch('/v1/models'); const d = await r.json(); setModelsList(d.data || []); } catch { }
+  }
   const [reqLogs, setReqLogs] = useState<{ items: any[]; total: number; page: number } | null>(null)
   const [usageStats, setUsageStats] = useState<any>(null)
   const [reqPage, setReqPage] = useState(1)
@@ -471,6 +476,7 @@ export default function App() {
     dashboard: t.nav.dashboard,
     accounts: t.nav.accounts,
     requests: t.nav.requests,
+    models: t.nav.models,
     playground: t.nav.playground,
     'api-keys': t.nav.apiKeys,
     logs: t.nav.logs,
@@ -480,6 +486,7 @@ export default function App() {
     dashboard: { bc: t.breadcrumb.dashboard, title: t.title.dashboard },
     accounts: { bc: t.breadcrumb.accounts, title: t.title.accounts },
     requests: { bc: t.breadcrumb.requests, title: t.title.requests },
+    models: { bc: t.breadcrumb.models, title: t.title.models },
     playground: { bc: t.breadcrumb.playground, title: t.title.playground },
     'api-keys': { bc: t.breadcrumb.apiKeys, title: t.title.apiKeys },
     logs: { bc: t.breadcrumb.logs, title: t.title.logs },
@@ -620,6 +627,7 @@ export default function App() {
 
   useEffect(() => { if (activeTab === 'logs') logEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [logs, activeTab])
   useEffect(() => { if (activeTab === 'requests') { loadReqLogs(1); loadUsageStats() } }, [activeTab])
+  useEffect(() => { if (activeTab === 'models') loadModels() }, [activeTab])
   useEffect(() => { if (activeTab === 'playground') chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [chatMessages, activeTab])
 
   // GSAP animations
@@ -1158,7 +1166,7 @@ export default function App() {
                             <tr key={acc.uid} className={`hover:bg-canvas-soft transition-colors group ${isActive ? 'bg-mint/5' : ''}`}>
                               <td className="px-6 py-5 font-bold text-ink"><div className="flex items-center gap-2">{acc.name}{isActive && <span className="text-[9px] bg-mint/20 text-ink px-1.5 py-0.5 rounded font-extrabold uppercase">Active</span>}</div></td>
                               <td className="px-6 py-5 font-mono text-xs text-body select-all">{acc.uid}</td>
-                              <td className="px-6 py-5"><div className="flex flex-col"><span className="text-xs font-semibold text-ink">{acc.user_type2 || acc.user_tag || acc.plan || 'Trial'}</span><span className="text-[10px] text-body font-mono">Credits: {(acc.quota_total ?? 0) > 0 ? `${acc.quota_remaining ?? 0} / ${acc.quota_total}` : ((acc.claimed_credits ?? 0) > 0 ? `★${acc.claimed_credits} 领取` : 'lite 免费')}</span></div></td>
+                              <td className="px-6 py-5"><div className="flex flex-col"><span className="text-xs font-semibold text-ink">{acc.user_type2 || acc.user_tag || acc.plan || 'Trial'}</span><span className="text-[10px] text-body font-mono">积分: {(acc.quota_total ?? 0) > 0 ? `${acc.quota_remaining ?? 0}/${acc.quota_total}` : `${acc.claimed_credits ?? 0} 领取 · 剩 ${(acc.claimed_credits ?? 0) - (acc.used_credits ?? 0)}`}</span></div></td>
                               <td className="px-6 py-5">
                                 {acc.is_quota_exceeded ? <span className="px-3 py-1 text-[10px] font-bold rounded-full uppercase tracking-wider bg-red-100 text-red-700">Exceeded</span>
                                 : acc.last_status === 'ok' ? <span className="px-3 py-1 text-[10px] font-bold rounded-full uppercase tracking-wider bg-mint/20 text-ink">Enabled</span>
@@ -1308,6 +1316,41 @@ export default function App() {
           )}
 
           {/* ─── LOGS ─── */}
+          {activeTab === 'models' && (
+            <div className="space-y-8">
+              <section className="flex justify-between items-end flex-wrap gap-4">
+                <div className="max-w-xl"><p className="text-body text-[16px]">官方目录级模型清单(价格系数 × 基准积分;free = 0 系数免费)。数据 5 分钟缓存,快照可热换。</p></div>
+                <button onClick={loadModels} className="flex items-center gap-2 px-4 py-2.5 text-body hover:text-ink font-bold text-sm"><span className="material-symbols-outlined text-[18px]">refresh</span>刷新</button>
+              </section>
+              <section className="bg-surface-card border border-hairline rounded-2xl overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead className="bg-canvas-soft border-b border-hairline">
+                      <tr>{['Model', '名称', '系数', '免费', '视觉', '推理', '上下文', '状态'].map((h, i) => (
+                        <th key={i} className="px-5 py-3 text-[10px] font-semibold text-body uppercase tracking-wider">{h}</th>
+                      ))}</tr>
+                    </thead>
+                    <tbody className="divide-y divide-hairline">
+                      {(modelsList || []).map((m: any, i: number) => (
+                        <tr key={i} className="hover:bg-canvas-soft transition-colors">
+                          <td className="px-5 py-3 text-xs font-bold text-ink font-mono">{m.id}</td>
+                          <td className="px-5 py-3 text-xs text-body">{m.qoder_display_name || '--'}</td>
+                          <td className="px-5 py-3 text-xs font-mono text-body">×{m.qoder_price_factor ?? '--'}</td>
+                          <td className="px-5 py-3">{m.qoder_free ? <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-mint/20 text-ink">FREE</span> : <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-amber-100 text-amber-700">Credits</span>}</td>
+                          <td className="px-5 py-3 text-xs text-body">{m.qoder_vision ? '👁' : '-'}</td>
+                          <td className="px-5 py-3 text-xs text-body">{m.qoder_reasoning ? '🧠' : '-'}</td>
+                          <td className="px-5 py-3 text-xs font-mono text-body">{m.context_window ? (m.context_window / 1000) + 'K' : '--'}</td>
+                          <td className="px-5 py-3">{m.qoder_enabled ? <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-mint/20 text-ink">启用</span> : <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-red-100 text-red-700">需升级</span>}</td>
+                        </tr>
+                      ))}
+                      {modelsList === null && <tr><td colSpan={8} className="py-8 text-center text-xs text-body">加载中…</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+          )}
+
           {activeTab === 'requests' && (
             <div className="space-y-8">
               <section className="grid grid-cols-2 md:grid-cols-5 gap-4 p-6 bg-white/60 border border-hairline rounded-2xl">

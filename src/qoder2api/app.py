@@ -314,11 +314,9 @@ async def delete_account(uid: str, verify: None = Depends(check_gateway_token)) 
 
 @app.get("/v1/models")
 async def v1_models():
-    """模型列表(lite 免费档;premium 档需账号有 credits,0 额度号 402)。"""
-    premium = [m.strip() for m in os.getenv("QODER_PREMIUM_MODELS", "plus,pro,max,ultra").split(",") if m.strip()]
-    data = [{"id": "lite", "object": "model", "owned_by": "qoder", "note": "free tier, unlimited for free accounts"}]
-    data += [{"id": m, "object": "model", "owned_by": "qoder", "note": "requires credits (402 on free accounts)"} for m in premium]
-    return {"object": "list", "data": data}
+    """官方目录级模型列表(价格系数/免费标记/上下文/能力,5 分钟缓存,快照可热换)。"""
+    from .models import api_models
+    return {"object": "list", "data": api_models()}
 
 
 @app.get("/ui/requests")
@@ -331,8 +329,26 @@ async def ui_requests(verify: None = Depends(check_gateway_token), page: int = 1
 
 @app.get("/ui/usage/stats")
 async def ui_usage_stats(verify: None = Depends(check_gateway_token), days: int = 7):
-    """用量统计:按日/按模型/按账号(tokens+credits),来自本地调用日志。"""
-    return usage_stats(days=min(max(days, 1), 31))
+    """用量统计:按日/按模型/按账号(tokens+credits)+ 全池积分账本(claimed/used/剩余)。"""
+    stats = usage_stats(days=min(max(days, 1), 31))
+    # 积分账本:领取累计 vs 本地记录的消费
+    from .database import get_db
+    with get_db() as conn:
+        rows = conn.execute("SELECT uid, name, claimed_credits FROM accounts WHERE enabled=1").fetchall()
+    used_by_uid = {a["uid"]: a.get("credits", 0) for a in stats.get("accounts", [])}
+    ledger = []
+    for r in rows:
+        used = round(used_by_uid.get(r["uid"], 0), 2)
+        claimed = r["claimed_credits"] or 0
+        ledger.append({"uid": r["uid"], "name": r["name"], "claimed": claimed,
+                       "used": used, "remaining": round(claimed - used, 2)})
+    stats["credits_ledger"] = ledger
+    stats["credits_total"] = {
+        "claimed": round(sum(x["claimed"] for x in ledger), 2),
+        "used": round(sum(x["used"] for x in ledger), 2),
+        "remaining": round(sum(x["remaining"] for x in ledger), 2),
+    }
+    return stats
 
 
 @app.post("/ui/accounts/refresh-quota")
