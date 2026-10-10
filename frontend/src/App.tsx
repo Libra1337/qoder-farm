@@ -12,7 +12,7 @@ interface Account {
   refresh_token: string; machine_id: string; enabled: boolean; last_status: string
   last_error: string | null; quota: number; is_quota_exceeded: boolean
   plan: string | null; user_tag: string | null; next_reset_at: number | null
-  quota_total?: number; quota_used?: number; quota_remaining?: number; quota_exceeded?: number; quota_updated_at?: string | null; user_type2?: string | null
+  quota_total?: number; quota_used?: number; quota_remaining?: number; quota_exceeded?: number; quota_updated_at?: string | null; user_type2?: string | null; claimed_credits?: number
 }
 interface AccountsConfig { accounts: Account[]; active_uid: string | null }
 interface UIStatus { ready: boolean; mode: string; username: string | null; uid: string | null; user_type: string | null; error: string | null; accounts_count: number }
@@ -1158,7 +1158,7 @@ export default function App() {
                             <tr key={acc.uid} className={`hover:bg-canvas-soft transition-colors group ${isActive ? 'bg-mint/5' : ''}`}>
                               <td className="px-6 py-5 font-bold text-ink"><div className="flex items-center gap-2">{acc.name}{isActive && <span className="text-[9px] bg-mint/20 text-ink px-1.5 py-0.5 rounded font-extrabold uppercase">Active</span>}</div></td>
                               <td className="px-6 py-5 font-mono text-xs text-body select-all">{acc.uid}</td>
-                              <td className="px-6 py-5"><div className="flex flex-col"><span className="text-xs font-semibold text-ink">{acc.user_type2 || acc.user_tag || acc.plan || 'Trial'}</span><span className="text-[10px] text-body font-mono">Credits: {acc.quota_remaining ?? '--'} / {acc.quota_total ?? '--'}</span></div></td>
+                              <td className="px-6 py-5"><div className="flex flex-col"><span className="text-xs font-semibold text-ink">{acc.user_type2 || acc.user_tag || acc.plan || 'Trial'}</span><span className="text-[10px] text-body font-mono">Credits: {(acc.quota_total ?? 0) > 0 ? `${acc.quota_remaining ?? 0} / ${acc.quota_total}` : ((acc.claimed_credits ?? 0) > 0 ? `★${acc.claimed_credits} 领取` : 'lite 免费')}</span></div></td>
                               <td className="px-6 py-5">
                                 {acc.is_quota_exceeded ? <span className="px-3 py-1 text-[10px] font-bold rounded-full uppercase tracking-wider bg-red-100 text-red-700">Exceeded</span>
                                 : acc.last_status === 'ok' ? <span className="px-3 py-1 text-[10px] font-bold rounded-full uppercase tracking-wider bg-mint/20 text-ink">Enabled</span>

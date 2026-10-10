@@ -27,6 +27,7 @@ def _migrate_columns(conn) -> None:
         ("quota_exceeded", "INTEGER DEFAULT 0"),
         ("quota_updated_at", "TEXT"),
         ("user_type2", "TEXT"),
+        ("claimed_credits", "REAL DEFAULT 0"),
     ):
         if col not in cols:
             conn.execute(f"ALTER TABLE accounts ADD COLUMN {col} {ddl}")

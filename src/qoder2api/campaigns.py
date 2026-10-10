@@ -163,6 +163,13 @@ def claim_daily(token: str, uid: str, ident: dict[str, Any] | None = None) -> di
     status = str(d.get("status") or "").upper()
     if status == "CLAIMED":
         amt = (d.get("benefit") or {}).get("amount") or 100
+        # 本地记账(上游 Bearer 接口不暴露活动余额,面板靠这个 + quota_exceeded 展示)
+        try:
+            from .database import get_db
+            with get_db() as _conn:
+                _conn.execute("UPDATE accounts SET claimed_credits = COALESCE(claimed_credits, 0) + ?, quota_exceeded = 0 WHERE uid = ?", (amt, uid))
+        except Exception:
+            pass
         return {"ok": True, "status": "CLAIMED", "replayed": bool(d.get("replayed")),
                 "amount": amt, "grant_id": d.get("grantId"), "message": f"领取成功 +{amt} Credits"}
     return {"ok": False, "status": status or f"HTTP{r.status_code}",
