@@ -148,23 +148,65 @@ def _slider_handle(page):
     return page.ele('css:[class*="slider-move"]', timeout=5)
 
 
+
+def build_drag_track(dx: float, dy: float = 0.0, duration_secs: float = 0.0) -> list[tuple[float, float, float]]:
+    """minimum-jerk 拟人轨迹(drission-rs human_drag_track 移植):
+    10t³-15t⁴+6t⁵ 钟形速度 + 密集采样 + 手抖 + 纵向漂移 + 末段过冲回拉 + 偶发迟疑。
+    返回 [(相对dx, 相对dy, 停顿秒)]。
+    """
+    dist = abs(dx)
+    dur = duration_secs if duration_secs > 0 else min(max(dist * 3.5 / 1000 + 0.32, 0.35), 1.6)
+    n = max(24, min(160, int(dur / 0.013)))
+    base = max(dur / n, 0.004)
+    overshoot = 1.02 + random.random() * 0.04 if dist > 40 else 1.0
+    fwd = int(n * 0.82)
+    back = max(n - fwd, 3)
+    drift_y = (random.random() - 0.5) * 6.0
+    mj = lambda t: 10*t**3 - 15*t**4 + 6*t**5
+    track = []
+    for i in range(1, fwd + 1):
+        t = i / fwd
+        frac = overshoot * mj(t)
+        track.append((dx * frac + (random.random() - 0.5),
+                      dy * frac + drift_y * mj(t) + (random.random() - 0.5) * 1.6,
+                      base * (1 + (random.random() - 0.5) * 0.8)))
+    for i in range(1, back + 1):
+        t = i / back
+        frac = overshoot - (overshoot - 1.0) * mj(t)
+        track.append((dx * frac + (random.random() - 0.5) * 0.8,
+                      dy * frac + drift_y + (random.random() - 0.5) * 1.2,
+                      base + 0.002))
+    track.append((dx, dy, base))
+    # 偶发迟疑
+    for _ in range(1 + int(random.random() * 2)):
+        if fwd > 4:
+            idx = 2 + int(random.random() * (fwd - 4))
+            if 0 <= idx < len(track):
+                x, y, d = track[idx]
+                track[idx] = (x, y, d + random.uniform(0.025, 0.075))
+    return track
+
+
+POINTER_STEALTH_JS = """(function(){try{var p=window.PointerEvent&&window.PointerEvent.prototype;if(!p)return;
+var d=Object.getOwnPropertyDescriptor(p,'pointerType');if(!d||!d.get)return;var o=d.get;
+Object.defineProperty(p,'pointerType',{configurable:true,enumerable:d.enumerable,
+get:function(){var v=o.call(this);return(v===''||v==null)?'mouse':v}})}catch(e){}})()"""
+
+
 def _human_drag(page, handle, distance: float) -> None:
-    """缓动 + 抖动轨迹拖动(与实测通过的 IAB 轨迹同构)。"""
+    """拟人拖动(minimum-jerk 轨迹版,替代旧 marks 缓动)。"""
     w, h = handle.rect.size
     hx, hy = handle.rect.location
     cx, cy = hx + w / 2, hy + h / 2
-    d = distance
-    marks = [0, 2, 5, 9, 15, 23, 33, 42, 49, 54, d * 0.97, d, d - 1, d]
-    marks = [m for m in marks if m <= d] if d < 54 else marks
+    track = build_drag_track(distance)
     acts = page.actions
     acts.move_to(handle)
     acts.hold()
-    prev_x, prev_y = 0.0, 0.0
-    for i, m in enumerate(marks[1:], start=1):
-        jy = random.uniform(-1.2, 1.2)
-        tx, ty = m, jy
-        acts.move(tx - prev_x, ty - prev_y, duration=random.uniform(0.02, 0.06))
-        prev_x, prev_y = tx, ty
+    px, py = 0.0, 0.0
+    for dx, dy, dur in track:
+        acts.move(dx - px, dy - py, duration=max(dur, 0.001))
+        px, py = dx, dy
+        time.sleep(max(dur, 0.001))
     acts.release()
 
 
@@ -217,8 +259,17 @@ def _log_attempt(rec: dict) -> None:
         pass
 
 
+def _ensure_pointer_stealth(page) -> None:
+    """修补合成 PointerEvent 的空 pointerType(行为风控识别自动化的破绽,drission-rs 移植)。"""
+    try:
+        page.run_js(f"if(!window.__ptrStealth){{{POINTER_STEALTH_JS};window.__ptrStealth=1}}")
+    except Exception:
+        pass
+
+
 def auto_solve_slider(page, log=print, max_attempts: int = 14) -> bool:
     """自动过滑块;成功返回 True。每次尝试:展开→取图→匹配→拖动→验证,失败刷新换图。"""
+    _ensure_pointer_stealth(page)
     _expand_captcha(page)
     for attempt in range(1, max_attempts + 1):
         imgs = _captcha_imgs(page)

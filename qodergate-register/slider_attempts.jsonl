@@ -63,3 +63,12 @@
 {"attempt": 13, "off": 15, "x": 132.8, "conf": 0.385, "method": "dip", "drag_display": 133.06750222762224, "pass": false, "ts": "2026-10-09T17:36:08Z"}
 {"attempt": 14, "off": 0, "x": 246.0, "conf": 0.337, "method": "dip", "drag_display": 247.80405405405406, "pass": false, "ts": "2026-10-09T17:36:11Z"}
 {"attempt": 14, "off": 0, "x": 198.3, "conf": 0.424, "method": "ncc", "drag_display": 199.425829218325, "pass": false, "ts": "2026-10-09T17:36:30Z"}
+{"attempt": 3, "off": 3, "x": 246.0, "conf": 0.391, "method": "dip", "drag_display": 247.80405405405406, "pass": false, "ts": "2026-10-10T18:10:08Z"}
+{"attempt": 4, "off": -5, "x": 179.0, "conf": 0.325, "method": "ncc", "drag_display": 179.85535168826547, "pass": false, "ts": "2026-10-10T18:10:31Z"}
+{"attempt": 6, "off": -8, "x": 173.1, "conf": 0.328, "method": "dip", "drag_display": 173.8876557034037, "pass": false, "ts": "2026-10-10T18:11:13Z"}
+{"attempt": 7, "off": 8, "x": 231.9, "conf": 0.451, "method": "ncc", "drag_display": 233.52948342386014, "pass": false, "ts": "2026-10-10T18:11:36Z"}
+{"attempt": 8, "off": -10, "x": 195.2, "conf": 0.355, "method": "ncc", "drag_display": 196.34191684723294, "pass": false, "ts": "2026-10-10T18:11:59Z"}
+{"attempt": 9, "off": 10, "x": 230.8, "conf": 0.379, "method": "dip", "drag_display": 232.4432991126254, "pass": false, "ts": "2026-10-10T18:12:23Z"}
+{"attempt": 10, "off": -12, "x": 246.0, "conf": 0.41, "method": "dip", "drag_display": 247.80405405405406, "pass": false, "ts": "2026-10-10T18:12:48Z"}
+{"attempt": 12, "off": -15, "x": 236.8, "conf": 0.379, "method": "ncc", "drag_display": 238.50221039290332, "pass": false, "ts": "2026-10-10T18:13:13Z"}
+{"attempt": 13, "off": 15, "x": 187.7, "conf": 0.495, "method": "dip", "drag_display": 188.7530767242714, "pass": false, "ts": "2026-10-10T18:13:37Z"}
