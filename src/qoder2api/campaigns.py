@@ -32,6 +32,7 @@ $HOME/.config/.locale_cfg 种子重跑组件即换;**macOS 种子位置未知(�
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -57,28 +58,56 @@ def find_umid_binary() -> str | None:
     return str(cands[0]) if cands else None
 
 
-def native_identity(uid: str) -> dict[str, Any] | None:
-    """取真机器身份:优先环境变量注入(物理机产出、任何地方可用),否则本机跑官方组件。"""
+# 身份环境池(实测 2026-10-11:runtime-info 第一个参数即"风控环境",不同值产出
+# 完全不同的 machineToken/Type/Code = 一台物理机自带多套设备身份,按号轮换)
+IDENTITY_ENVS = [int(e) for e in os.getenv("QODER_UMID_ENVS", "0,3,4,5,6,7").split(",") if e.strip()]
+_identity_cache: dict[int, dict[str, Any]] = {}
+
+
+def _run_umid(env_num: int, uid: str) -> dict[str, Any] | None:
+    binary = find_umid_binary()
+    if not binary:
+        return None
+    try:
+        out = subprocess.run([binary, str(env_num), "--account-stdin"],
+                             input=json.dumps({"account": uid}).encode(), capture_output=True, timeout=30)
+        d = json.loads(out.stdout.decode().splitlines()[0])
+        if d.get("machineToken") and not d.get("vmInfo", {}).get("isVm"):
+            return d
+    except Exception:
+        pass
+    return None
+
+
+def native_identity(uid: str, slot: int = 0) -> dict[str, Any] | None:
+    """取真机器身份(按 slot 轮换身份池)。
+
+    优先级:
+      1. 环境变量单身份(QODER_UMID_TOKEN/TYPE/CODE,服务器无组件时用)
+      2. 环境变量身份池(QODER_UMID_POOL="token:type:code;token:type:code;...")
+      3. 本机组件按 env 参数(slot→IDENTITY_ENVS[slot])现算并缓存
+    """
     env_tok = os.getenv("QODER_UMID_TOKEN", "").strip()
     if env_tok:
         return {"machineToken": env_tok,
                 "machineType": os.getenv("QODER_UMID_TYPE", ""),
                 "machineCode": os.getenv("QODER_UMID_CODE", "")}
-    binary = find_umid_binary()
-    if not binary:
-        return None
-    try:
-        out = subprocess.run([binary, "prod", "--account-stdin"],
-                             input=json.dumps({"account": uid}), capture_output=True,
-                             timeout=30)
-        d = json.loads(out.stdout.decode())
-        if d.get("vmInfo", {}).get("isVm"):
-            return {"__vm__": True, **d}
-        if d.get("machineToken"):
-            return d
-    except Exception:
-        pass
-    return None
+    pool = os.getenv("QODER_UMID_POOL", "").strip()
+    if pool:
+        entries = [e for e in pool.split(";") if e.count(":") >= 2]
+        if entries:
+            slot %= len(entries)
+            tok, mtype, mcode = entries[slot].split(":", 2)
+            return {"machineToken": tok, "machineType": mtype, "machineCode": mcode}
+    env_num = IDENTITY_ENVS[slot % len(IDENTITY_ENVS)]
+    if env_num not in _identity_cache:
+        _identity_cache[env_num] = _run_umid(env_num, uid) or {}
+    return _identity_cache[env_num] or None
+
+
+def _uid_slot(uid: str) -> int:
+    """账号稳定派生身份槽位(同号恒定,异号尽量分散)。"""
+    return int(hashlib.sha256(uid.encode()).hexdigest()[:2], 16)
 
 
 def desktop_headers(token: str, uid: str, ident: dict[str, Any]) -> dict[str, str] | None:
@@ -103,8 +132,9 @@ def desktop_headers(token: str, uid: str, ident: dict[str, Any]) -> dict[str, st
     }
 
 
-def list_campaigns(token: str, uid: str, ident: dict[str, Any]) -> list[dict[str, Any]]:
-    H = desktop_headers(token, uid, ident)
+def list_campaigns(token: str, uid: str, ident: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    ident = ident or native_identity(uid, slot=_uid_slot(uid))
+    H = desktop_headers(token, uid, ident) if ident else None
     if not H:
         return []
     r = httpx.get(f"{OPENAPI}/sash/api/v1/me/campaigns", headers=H, timeout=25)
@@ -115,7 +145,8 @@ def list_campaigns(token: str, uid: str, ident: dict[str, Any]) -> list[dict[str
 
 def claim_daily(token: str, uid: str, ident: dict[str, Any] | None = None) -> dict[str, Any]:
     """找到「每天领 100 Credits」并领取。返回 {ok, status, amount, message}。"""
-    ident = ident or native_identity(uid)
+    if ident is None:
+        ident = native_identity(uid, slot=_uid_slot(uid))
     camps = list_campaigns(token, uid, ident or {})
     daily = next((c for c in camps if c.get("actionType") == "CLAIM_BENEFIT"
                   and (c.get("benefit") or {}).get("kind") == "CREDITS"), None)
