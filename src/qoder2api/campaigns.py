@@ -145,9 +145,22 @@ def list_campaigns(token: str, uid: str, ident: dict[str, Any] | None = None) ->
 
 def claim_daily(token: str, uid: str, ident: dict[str, Any] | None = None) -> dict[str, Any]:
     """找到「每天领 100 Credits」并领取。返回 {ok, status, amount, message}。"""
-    if ident is None:
-        ident = native_identity(uid, slot=_uid_slot(uid))
-    camps = list_campaigns(token, uid, ident or {})
+    # 逐身份轮试:不同账号的活动可见性绑不同设备身份,直到某个身份下出现活动
+    camps = []
+    ident = ident or native_identity(uid, slot=_uid_slot(uid))
+    if ident:
+        camps = list_campaigns(token, uid, ident)
+    if not camps:
+        import os as _os
+        pool_n = len([e for e in _os.getenv("QODER_UMID_POOL", "").split(";") if e.count(":") >= 2]) or len(IDENTITY_ENVS)
+        for k in range(1, max(pool_n, 1)):
+            ident2 = native_identity(uid, slot=_uid_slot(uid) + k)
+            if not ident2 or (ident and ident2.get("machineToken") == ident.get("machineToken")):
+                continue
+            camps = list_campaigns(token, uid, ident2)
+            if camps:
+                ident = ident2
+                break
     daily = next((c for c in camps if c.get("actionType") == "CLAIM_BENEFIT"
                   and (c.get("benefit") or {}).get("kind") == "CREDITS"), None)
     if not daily:
