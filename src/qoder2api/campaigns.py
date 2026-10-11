@@ -92,13 +92,16 @@ def native_identity(uid: str, slot: int = 0) -> dict[str, Any] | None:
         return {"machineToken": env_tok,
                 "machineType": os.getenv("QODER_UMID_TYPE", ""),
                 "machineCode": os.getenv("QODER_UMID_CODE", "")}
+    # 池(env 可覆盖,否则用内置默认)
     pool = os.getenv("QODER_UMID_POOL", "").strip()
-    if pool:
-        entries = [e for e in pool.split(";") if e.count(":") >= 2]
-        if entries:
-            slot %= len(entries)
-            tok, mtype, mcode = entries[slot].split(":", 2)
-            return {"machineToken": tok, "machineType": mtype, "machineCode": mcode}
+    if not pool:
+        # 内置默认池(Mac 物理机 6 套身份,2026-10-11 生成)
+        pool = "P1gA-rcT8LoccHcrK9raTl7J1YwCEbQqgSBxY_8s3QUUTfrk_wVArDQ4MmoZadociTEjht_AkYH0YeMrIxuUHTSD:8082b5c49191dc0212:806980430080e05d61;P1gA4smXvKvoL28JE0-OIBggowINRGKWpsHFD72ro4IqWfhk0NUqz6bodYQukmFeKoMoaahHF7q6-7_y_tmUM7YP:dcea89f89156308ad1:c188573500cb8bf2cb;P1gAEZEt91T5BXgWcpOmBvdmJ9rjQJXJeEQwIYn408xRXsVWR4liaiZUq5xIKextPjGgDMiY63r_aQ9Zs_yGcYBx:fa23182491b61befb0:befed7e8007af543f9;P1gAIeDcXrpkNgCw8OTh26355TkkLdqiTi9K3nUwvZAXLPAu833fLiqsb6eu7hDzaFYt7uGIRiw-eoB_TRfEwbeJ:95a3d3de91b30030b9:5306556000c6700e99;P1gAx4tdsmQzJpYVNKef888Ec8xv5uQp3eaqnRh6TW_g2B0k5pXPdXXY4cE6lEW6DkKjs8iQ-8BCRF3BEt3RSihS:000aee9391a63aadc3:8151a8b10029507cd7;P1gA_OXBzhu9GkiBniaKUFGEYqBT5H0Y3Hg5NaEujQazCvYAf3u1ul6HhiX6qngwVPWinzS5h_jK9VJdalxKKW_0:7a057fe791378e4359:11954e9500d021ed68"
+    entries = [e for e in pool.split(";") if e.count(":") >= 2]
+    if entries:
+        slot %= len(entries)
+        tok, mtype, mcode = entries[slot].split(":", 2)
+        return {"machineToken": tok, "machineType": mtype, "machineCode": mcode}
     env_num = IDENTITY_ENVS[slot % len(IDENTITY_ENVS)]
     if env_num not in _identity_cache:
         _identity_cache[env_num] = _run_umid(env_num, uid) or {}

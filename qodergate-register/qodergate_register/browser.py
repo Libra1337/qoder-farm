@@ -379,6 +379,16 @@ class ChromiumPage:
         loc = scope.locator(sel) if scope is not None else self._page.locator(sel)
         return [Element(loc.nth(i), self) for i in range(loc.count())]
 
+    def run_js(self, script: str, *args, **kwargs):
+        """在页面执行 JS(DrissionPage 兼容)。script 可带 return 表达式。"""
+        # DrissionPage run_js 把脚本包成函数体执行;等价用 page.evaluate
+        if not script.strip().startswith("return") and "return " in script:
+            # 已包含 return 的异步/复杂脚本直接包 IIFE
+            wrapped = f"(() => {{ {script} }})()" if not script.strip().startswith("(async") else script
+        else:
+            wrapped = script
+        return self._page.evaluate(wrapped)
+
     def get_tabs(self) -> list:
         try:
             return list(self._context.pages)

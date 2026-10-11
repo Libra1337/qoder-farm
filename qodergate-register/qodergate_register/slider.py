@@ -19,7 +19,10 @@ Qoder 阿里滑块自动破解(2026-10-08 IAB 实测通过)
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
+import json
+import os
 import random
 import time
 from typing import Any
@@ -296,6 +299,30 @@ def auto_solve_slider(page, log=print, max_attempts: int = 14) -> bool:
             _refresh_captcha(page)
             time.sleep(1.5)
             continue
+        # 闭环模式(默认开):灰幕检测目标 + 每步读 strip.left 到位即停
+        if os.environ.get("QODER_CLOSED_LOOP", "1") != "0":
+            try:
+                _gi = page.run_js(GAP_ANALYZE_JS, as_expr=True)
+                if _gi:
+                    gi = json.loads(_gi) if isinstance(_gi, str) else _gi
+                    target = float(gi.get("targetLeft") or 0)
+                    if 5 < target < float(gi.get("puzzleW") or 300):
+                        log(f"[slider] attempt {attempt}: closed-loop target={target:.1f}px")
+                        handle = _slider_handle(page)
+                        if handle and _closed_loop_drag(page, handle, target):
+                            time.sleep(3.5)
+                            if _passed(page):
+                                log(f"[slider] CLOSED-LOOP PASSED at attempt {attempt}")
+                                _log_attempt({"attempt": attempt, "off": 0, "x": round(gi.get("gapCenter", 0), 1), "conf": 1.0, "method": "closed-loop", "drag_display": target, "pass": True})
+                                return True
+                            log(f"[slider] attempt {attempt}: closed-loop rejected, refreshing")
+                            _log_attempt({"attempt": attempt, "off": 0, "x": round(gi.get("gapCenter", 0), 1), "conf": 1.0, "method": "closed-loop", "drag_display": target, "pass": False})
+                            _expand_captcha(page)
+                            _refresh_captcha(page)
+                            time.sleep(1.6)
+                            continue
+            except Exception as _e:
+                log(f"[slider] closed-loop err({_e}), fallback to open-loop")
         off = OFFSET_SWEEP[min(attempt - 1, len(OFFSET_SWEEP) - 1)]
         d = sol["drag_display"] + off
         log(f"[slider] attempt {attempt}: match x={sol['x']} conf={sol['conf']} drag={d:.1f}px (off {off:+d})")
@@ -321,3 +348,118 @@ def auto_solve_slider(page, log=print, max_attempts: int = 14) -> bool:
         _refresh_captcha(page)
         time.sleep(1.4)
     return False
+
+
+# ---------------------------------------------------------------------------
+# 闭环拖动(移植自 0xgetz/aliyun-puzzle-solver,qoder.com 实测验证 2026-09):
+# 不是预计算轨迹一次拖到位,而是每步 3-14px、32ms 间隔,每次读拼图条 style.left,
+# 到位即停——"fast/overshoot/single-jump drags are rejected even when geometrically perfect"
+# ---------------------------------------------------------------------------
+READ_LEFT_JS = """(() => {
+  const strip = [...document.querySelectorAll('img')].find(e =>
+    e.classList.length === 0 &&
+    Math.round(e.naturalWidth) >= 40 && Math.round(e.naturalWidth) <= 60 &&
+    Math.round(e.naturalHeight) > 120);
+  return strip ? (strip.style.left || "0") : "-1";
+})()"""
+
+GAP_ANALYZE_JS = """(async () => {
+  async function pix(url) {
+    const resp = await fetch(url);
+    const blob = await resp.blob();
+    const bmp = await createImageBitmap(blob);
+    const c = document.createElement('canvas');
+    c.width = bmp.width; c.height = bmp.height;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(bmp, 0, 0);
+    return { w: bmp.width, h: bmp.height, d: ctx.getImageData(0, 0, bmp.width, bmp.height).data };
+  }
+  const imgs = [...document.querySelectorAll('img')].filter(i => i.getBoundingClientRect().height > 100 && i.getBoundingClientRect().width > 40);
+  const puzzle = imgs.sort((a,b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width)[0];
+  const strip = imgs.find(e => Math.round(e.naturalWidth) >= 40 && Math.round(e.naturalWidth) <= 60 && Math.round(e.naturalHeight) > 120);
+  if (!puzzle || !strip) return null;
+  const pu = await pix(puzzle.src), st = await pix(strip.src);
+  const w = pu.w, h = pu.h;
+  let minx = 1e9, maxx = -1, miny = 1e9, maxy = -1;
+  for (let y = 0; y < st.h; y++) for (let x = 0; x < st.w; x++) {
+    const a = st.d[(y * st.w + x) * 4 + 3];
+    if (a > 30) { if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y; }
+  }
+  if (maxx < 0) return null;
+  const bandH = Math.max(1, maxy - miny);
+  const cols = new Array(w).fill(0);
+  for (let y = miny; y <= maxy; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4;
+    const R = pu.d[i], G = pu.d[i+1], B = pu.d[i+2];
+    const mx = Math.max(R,G,B), mn = Math.min(R,G,B);
+    if (mx - mn < 40 && (R+G+B)/3 > 140) cols[x]++;
+  }
+  let ranges = [], inR = false, s0 = 0;
+  const hi = Math.max(8, Math.round(bandH * 0.25));
+  const lo = Math.max(4, Math.round(bandH * 0.12));
+  for (let x = 0; x < w; x++) {
+    if (cols[x] >= hi && !inR) { inR = true; s0 = x; }
+    else if (inR && cols[x] < lo) { inR = false; ranges.push([s0, x-1]); }
+  }
+  if (inR) ranges.push([s0, w-1]);
+  ranges = ranges.filter(r => r[1] - r[0] > 12);
+  if (!ranges.length) return null;
+  ranges.sort((a,b) => (b[1]-b[0]) - (a[1]-a[0]));
+  const gap = ranges[0];
+  const gapCenter = (gap[0] + gap[1]) / 2;
+  const pieceCx = (minx + maxx) / 2;
+  const scale = puzzle.getBoundingClientRect().width / w;
+  const targetLeft = gapCenter * scale - pieceCx;
+  return JSON.stringify({ gapCenter, pieceCx, targetLeft, scale, puzzleW: w });
+})()"""
+
+
+def _read_strip_left(page) -> float:
+    try:
+        v = page.run_js(f"return ({READ_LEFT_JS})")
+        return float(v) if v is not None else -1.0
+    except Exception:
+        return -1.0
+
+
+def _closed_loop_drag(page, handle, target_left: float, log=None) -> bool:
+    """闭环拖动:每步小距离(3-14px),每次读 strip.style.left,到位(±1.5px)即停。"""
+    w, h = handle.rect.size
+    hx, hy = handle.rect.location
+    cx, cy = hx + w / 2, hy + h / 2
+    acts = page.actions
+    # 拟人预移(wander):8 步缓入 + 到位停顿
+    import random as _r
+    for i in range(8):
+        wx, wy = cx - 100 + i * 12 + _r.uniform(-15, 15), cy - 30 + _r.uniform(-20, 20)
+        try:
+            acts.move_to((wx, wy))
+            time.sleep(0.028)
+        except Exception:
+            pass
+    acts.move_to(handle)
+    time.sleep(0.23)
+    acts.hold()
+    time.sleep(0.2)
+    px = cx
+    for k in range(90):
+        left = _read_strip_left(page)
+        if left < 0:
+            acts.release()
+            return False
+        if left >= target_left - 1.5:
+            break
+        rem = target_left - left
+        step = min(14, max(3, rem * 0.35))
+        px += step
+        yy = cy + ((k % 5) - 2) * 0.8
+        try:
+            acts.move(step, yy - cy, duration=0.001)
+            acts.move_to((px, yy))
+        except Exception:
+            pass
+        cy = yy
+        time.sleep(0.032)
+    acts.release()
+    time.sleep(0.3)
+    return True
